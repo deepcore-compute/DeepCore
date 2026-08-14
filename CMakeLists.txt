@@ -50,10 +50,41 @@ endif()
 # packages) and reproducible-build checksums must be generated with it OFF.
 option(DEEPCORE_ENABLE_NATIVE_OPT "GCC/Clang only: enable -march=native and -ffast-math (breaks portability & FP determinism, local-build-only)" OFF)
 
-# CUDA kernels are not implemented yet. This flag is a placeholder for the
-# milestone where enable_language(CUDA) and real .cu sources are added; it
-# must not be turned on until sm_* backends exist and pass correctness tests.
-option(DEEPCORE_WITH_CUDA "Enable CUDA language/backend (not yet implemented)" OFF)
+# A ProgPowZ CUDA kernel (src/cuda/progpowz_kernel.cu) exists and its
+# algorithm core has been validated on CPU (see
+# tools/cuda_selftest/cuda_selftest.cpp / src/cuda/README.md), but the
+# kernel itself has never been compiled or run on a GPU - this flag stays
+# OFF by default until that has actually happened on real hardware. When
+# turned ON without a working CUDA Toolkit installed, configuration
+# degrades gracefully (a warning, CUDA targets skipped) rather than
+# failing - see the check_language(CUDA) guard below.
+option(DEEPCORE_WITH_CUDA "Enable CUDA language/backend and build GPU kernel targets (requires the CUDA Toolkit; kernel is unvalidated on real hardware so far)" OFF)
+
+# Detect whether a CUDA compiler is actually available before committing to
+# enable_language(CUDA), which would otherwise hard-fail configuration on
+# any machine without the CUDA Toolkit (such as the one this project was
+# initially scaffolded on). This lets DEEPCORE_WITH_CUDA be turned ON
+# unconditionally in CI/build scripts without those failing on non-GPU
+# build agents - it just skips the CUDA targets with a warning instead.
+if(DEEPCORE_WITH_CUDA)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        enable_language(CUDA)
+        set(CMAKE_CUDA_STANDARD 17)
+        set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+        if(NOT CMAKE_CUDA_ARCHITECTURES)
+            # This project's actual GPU fleet: Tesla V100-SXM2 (Volta,
+            # sm_70) and Tesla A100 (Ampere, sm_80). Extend this list only
+            # when a new architecture has real hardware to validate kernels
+            # against - see the "refuse to start on an unsupported GPU"
+            # requirement in the project's hardware-support policy.
+            set(CMAKE_CUDA_ARCHITECTURES "70;80")
+        endif()
+    else()
+        message(WARNING "DEEPCORE_WITH_CUDA is ON but no CUDA compiler was found - GPU kernel targets will be skipped.")
+    endif()
+endif()
 
 # ----- Core target -----------------------------------------------------------
 add_executable(deepcore-miner
@@ -179,6 +210,22 @@ if(DEEPCORE_BUILD_REFERENCE_TOOLS)
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
     )
+
+    # Actual GPU correctness gate (see tools/cuda_selftest/gpu_selftest.cu
+    # header comment) - only built when a CUDA compiler was actually found
+    # above. This is the target that must be run on real Volta/Ampere
+    # hardware before src/cuda/progpowz_kernel.cu can be trusted at all.
+    if(DEEPCORE_WITH_CUDA AND CMAKE_CUDA_COMPILER)
+        add_executable(deepcore-gpu-selftest
+            tools/cuda_selftest/gpu_selftest.cu
+        )
+        target_link_libraries(deepcore-gpu-selftest PRIVATE ethash-progpow-ref)
+        target_include_directories(deepcore-gpu-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda)
+        set_target_properties(deepcore-gpu-selftest PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED ON
+        )
+    endif()
 endif()
 
 # -----------------------------------------------------------------------------

@@ -49,14 +49,37 @@ must keep passing: this algorithm has enough small, easy-to-get-wrong
 details that "looks right" is not a substitute for "matches the reference
 byte-for-byte."
 
+## What exists now: `progpowz_kernel.cu` + `gpu_selftest.cu`
+
+`progpowz_kernel.cu` adds a `__global__` kernel (`progpowz_light_kernel`)
+that is one thread = one nonce, calling `progpowz_hash_light()` from
+`progpowz_portable.hpp` unmodified, plus a host-side launch wrapper
+(`run_progpowz_light_gpu`: `cudaMalloc`/`cudaMemcpy`/launch/copy-back,
+with `cudaGetErrorString`-based error checking).
+
+`tools/cuda_selftest/gpu_selftest.cu` is the actual validation gate: it
+builds a real epoch context via the reference library (same as
+`cuda_selftest.cpp`), runs the same 4 fixed vectors through the GPU kernel,
+and compares against the CPU reference byte-for-byte. Wired into CMake as
+the `deepcore-gpu-selftest` target, built only when `-DDEEPCORE_WITH_CUDA=ON`
+*and* a CUDA compiler is actually found (`check_language(CUDA)` - see
+`CMakeLists.txt`; this degrades to a warning and skips the target rather
+than failing configuration on machines without the CUDA Toolkit, which is
+what this development environment is).
+
+**`deepcore-gpu-selftest` has never been built or run.** No CUDA Toolkit or
+NVIDIA GPU is available in the environment that wrote this code. The
+configure-time guard above has been verified to degrade gracefully here
+(confirmed: `-DDEEPCORE_WITH_CUDA=ON` on this machine prints the expected
+warning and skips the CUDA targets, rest of the build still succeeds) -
+that is the only thing about the CUDA path that has actually been
+exercised. Everything inside `progpowz_kernel.cu` and `gpu_selftest.cu`
+themselves - does it compile with `nvcc`, does the kernel launch, does it
+produce correct output on a Volta/Ampere GPU - is unverified and must be
+checked on real hardware before being trusted.
+
 ## What does NOT exist yet
 
-- **No actual `.cu` file / CUDA kernel.** `progpowz_portable.hpp` has never
-  been compiled with `nvcc` or run on a GPU - this development environment
-  has neither the CUDA Toolkit nor an NVIDIA GPU available. It is written
-  to be device-compatible (`__host__ __device__`, CUDA intrinsics gated
-  behind `__CUDA_ARCH__`), but that has only been checked by inspection,
-  not by an actual device compile.
 - **No full-DAG (mining-speed) kernel.** This only implements the
   "light"/cache-based path (recompute each dataset item on demand), which
   is what the reference vectors were generated with and is fine for a
@@ -74,12 +97,16 @@ byte-for-byte."
 
 1. Get this code onto a machine with the CUDA Toolkit and a Volta or
    Ampere GPU (matching the project's actual hardware: Tesla V100-SXM2 /
-   Tesla A100). Write a thin `.cu` wrapper: one `__global__` kernel launch
-   parameter block, device-side buffers for `light_cache` / `l1_cache`
-   (uploaded once per epoch via `cudaMemcpy`), one thread per nonce calling
-   `progpowz_hash_light()` unmodified, results copied back and compared
-   against the same reference vectors `deepcore-cuda-selftest` already
-   uses. This is the first real "does this run correctly on a GPU" gate.
+   Tesla A100). The kernel and its self-test already exist
+   (`progpowz_kernel.cu`, `tools/cuda_selftest/gpu_selftest.cu`) - configure
+   with `-DDEEPCORE_WITH_CUDA=ON`, build the `deepcore-gpu-selftest` target,
+   and run it. This is the first real "does this run correctly on a GPU"
+   gate, and it has not been exercised anywhere yet. Expect to find and fix
+   real bugs here (nvcc compile errors, launch failures, or wrong output) -
+   the CPU self-test already caught three subtle algorithm bugs before it
+   passed; there is no reason to assume the CUDA-specific parts (kernel
+   launch config, memory transfers, `__CUDA_ARCH__`-gated intrinsics) are
+   bug-free on the first try either.
 2. Only after (1) passes: build the full-dataset (precomputed DAG in
    VRAM) path for real mining throughput, sized dynamically from queried
    free VRAM (see `gpu_manager.hpp`'s telemetry interface) - never a
