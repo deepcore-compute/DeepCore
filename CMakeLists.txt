@@ -12,10 +12,14 @@ cmake_minimum_required(VERSION 3.20)
 #     added without restructuring the top-level layout
 # -----------------------------------------------------------------------------
 
+# C is needed alongside C++ only for the vendored ProgPowZ reference code
+# under third_party/ethash-progpow-ref, which has a handful of plain-C
+# source files (Keccak permutation, prime-search helpers). deepcore-miner
+# itself is pure C++.
 project(DeepCore
     VERSION 0.1.0
     DESCRIPTION "DeepCore multi-coin NVIDIA GPU miner"
-    LANGUAGES CXX
+    LANGUAGES CXX C
 )
 
 # ----- Language standard ----------------------------------------------------
@@ -114,6 +118,51 @@ target_compile_options(deepcore-miner PRIVATE
 target_link_options(deepcore-miner PRIVATE
     $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/LTCG>
 )
+
+# -----------------------------------------------------------------------------
+# ProgPowZ correctness reference (vendored, unmodified third-party code)
+#
+# This is Zano's own ProgPoW/Ethash reference implementation (see
+# third_party/ethash-progpow-ref/README.md for provenance and license). It
+# is built as a small, separate static library so the correctness-checking
+# tool below can link it - it is never linked into deepcore-miner itself.
+# -----------------------------------------------------------------------------
+option(DEEPCORE_BUILD_REFERENCE_TOOLS "Build the vendored ProgPowZ reference and its test-vector generator" ON)
+
+if(DEEPCORE_BUILD_REFERENCE_TOOLS)
+    set(ETHASH_REF_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ethash-progpow-ref)
+
+    add_library(ethash-progpow-ref STATIC
+        ${ETHASH_REF_DIR}/ethash.cpp
+        ${ETHASH_REF_DIR}/managed.cpp
+        ${ETHASH_REF_DIR}/progpow.cpp
+        ${ETHASH_REF_DIR}/keccak.c
+        ${ETHASH_REF_DIR}/keccakf800.c
+        ${ETHASH_REF_DIR}/keccakf1600.c
+        ${ETHASH_REF_DIR}/primes.c
+    )
+
+    # Vendored code as-is (see README.md: "not modified from upstream"), so
+    # it is not held to this project's own warning/standard settings -
+    # C++17 is what upstream targets and is fully valid to compile under a
+    # C++20 toolchain without changes.
+    target_include_directories(ethash-progpow-ref SYSTEM PUBLIC ${ETHASH_REF_DIR})
+    set_target_properties(ethash-progpow-ref PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+    )
+
+    add_executable(deepcore-gen-vectors
+        tools/reference/gen_vectors.cpp
+    )
+    target_link_libraries(deepcore-gen-vectors PRIVATE ethash-progpow-ref)
+    set_target_properties(deepcore-gen-vectors PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+    )
+endif()
 
 # -----------------------------------------------------------------------------
 # Future extension points (documented, not yet wired up):
