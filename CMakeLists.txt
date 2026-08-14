@@ -162,6 +162,23 @@ if(DEEPCORE_BUILD_REFERENCE_TOOLS)
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
     )
+
+    # CPU-only correctness check for src/cuda/progpowz_portable.hpp (see
+    # that file's header comment): compares our portable, host/device
+    # -callable ProgPowZ port against the unmodified reference
+    # implementation, with zero CUDA toolchain dependency. This must pass
+    # before any CUDA kernel built on top of progpowz_portable.hpp can be
+    # trusted.
+    add_executable(deepcore-cuda-selftest
+        tools/cuda_selftest/cuda_selftest.cpp
+    )
+    target_link_libraries(deepcore-cuda-selftest PRIVATE ethash-progpow-ref)
+    target_include_directories(deepcore-cuda-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda)
+    set_target_properties(deepcore-cuda-selftest PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+    )
 endif()
 
 # -----------------------------------------------------------------------------
