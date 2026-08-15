@@ -330,6 +330,48 @@ target_link_options(deepcore-miner PRIVATE
 )
 
 # -----------------------------------------------------------------------------
+# Zano stratum wire protocol (pure encode/decode, no networking yet - see
+# src/network/README.md). Uses nlohmann::json (single header, MIT license,
+# https://github.com/nlohmann/json) for JSON parsing/building rather than a
+# hand-rolled parser - this is exactly the "production JSON backend" the
+# original stratum_client.hpp placeholder comment called out as still
+# needed. Fetched at configure time and pinned to a specific release tag for
+# reproducibility.
+# -----------------------------------------------------------------------------
+option(DEEPCORE_BUILD_NETWORK_PROTOCOL "Build the Zano stratum wire-protocol library and its self-test (fetches nlohmann::json)" ON)
+
+if(DEEPCORE_BUILD_NETWORK_PROTOCOL)
+    include(FetchContent)
+    FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.11.3
+        GIT_SHALLOW TRUE
+    )
+    # nlohmann::json's own tests/docs/tools aren't needed - only the header.
+    set(JSON_BuildTests OFF CACHE INTERNAL "")
+    FetchContent_MakeAvailable(nlohmann_json)
+
+    add_library(zano-stratum-protocol STATIC
+        src/network/zano_stratum_protocol.cpp
+    )
+    target_include_directories(zano-stratum-protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(zano-stratum-protocol PUBLIC nlohmann_json::nlohmann_json)
+    target_compile_options(zano-stratum-protocol PRIVATE
+        $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-Wall -Wextra -Wpedantic>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    )
+
+    # CPU-only, no-network correctness check for the wire-protocol layer
+    # (encode/decode against zanod's actual message shapes) - must pass
+    # before any socket code is trusted to be talking the right protocol.
+    add_executable(deepcore-protocol-selftest
+        tools/protocol_selftest/protocol_selftest.cpp
+    )
+    target_link_libraries(deepcore-protocol-selftest PRIVATE zano-stratum-protocol)
+endif()
+
+# -----------------------------------------------------------------------------
 # ProgPowZ correctness reference (vendored, unmodified third-party code)
 #
 # This is Zano's own ProgPoW/Ethash reference implementation (see
