@@ -83,6 +83,9 @@ ipch/
 .cursor/
 .cursorignore.local
 
+# ----- Claude Code (local session state, agent worktrees) -----------------
+.claude/
+
 # ----- JetBrains / CLion ---------------------------------------------------
 .idea/
 cmake-build-debug/
