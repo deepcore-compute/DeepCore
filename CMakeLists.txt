@@ -484,6 +484,31 @@ if(DEEPCORE_BUILD_REFERENCE_TOOLS)
 endif()
 
 # -----------------------------------------------------------------------------
+# ProgPowZ mining-loop glue (job parsing, target comparison, share
+# formatting) - pure data transformation between a pool job and the
+# hashing core, no sockets/GPU here. Needs both the wire-protocol library
+# (to parse a job's raw JSON payload) and the vendored reference library
+# (its self-test cross-validates a Keccak-256 port against the real
+# implementation), so it's only built when both are available.
+# -----------------------------------------------------------------------------
+if(DEEPCORE_BUILD_NETWORK_PROTOCOL AND DEEPCORE_BUILD_REFERENCE_TOOLS)
+    add_library(deepcore-progpowz-work STATIC
+        src/mining/progpowz_work.cpp
+    )
+    target_include_directories(deepcore-progpowz-work PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(deepcore-progpowz-work PUBLIC zano-stratum-protocol)
+    target_compile_options(deepcore-progpowz-work PRIVATE
+        $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-Wall -Wextra -Wpedantic>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    )
+
+    add_executable(deepcore-mining-selftest
+        tools/mining_selftest/mining_selftest.cpp
+    )
+    target_link_libraries(deepcore-mining-selftest PRIVATE deepcore-progpowz-work ethash-progpow-ref)
+endif()
+
+# -----------------------------------------------------------------------------
 # Future extension points (documented, not yet wired up):
 #   - enable_language(CUDA) + per-architecture object libraries under
 #     src/cuda/sm_60, sm_70, sm_75, sm_80_86, sm_89, sm_90, sm_100_120,
