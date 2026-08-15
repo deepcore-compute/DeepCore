@@ -2,7 +2,7 @@
 
 ## Status (current milestone)
 
-**Algorithm correctness: validated on CPU. GPU execution: not yet attempted.**
+**Algorithm correctness: validated on CPU. GPU execution: validated on real hardware.** `deepcore-gpu-selftest` has been built and run on a Quadro GV100 (Volta, `sm_70`) and all 4 recorded test vectors passed byte-for-byte (`final_hash` and `mix_hash`) against the CPU reference.
 
 `progpowz_portable.hpp` is a from-scratch port of ProgPowZ's per-nonce hash
 algorithm (Keccak-f[1600], Keccak-f[800], dataset-item generation, the
@@ -67,16 +67,14 @@ the `deepcore-gpu-selftest` target, built only when `-DDEEPCORE_WITH_CUDA=ON`
 than failing configuration on machines without the CUDA Toolkit, which is
 what this development environment is).
 
-**`deepcore-gpu-selftest` has never been built or run.** No CUDA Toolkit or
-NVIDIA GPU is available in the environment that wrote this code. The
-configure-time guard above has been verified to degrade gracefully here
-(confirmed: `-DDEEPCORE_WITH_CUDA=ON` on this machine prints the expected
-warning and skips the CUDA targets, rest of the build still succeeds) -
-that is the only thing about the CUDA path that has actually been
-exercised. Everything inside `progpowz_kernel.cu` and `gpu_selftest.cu`
-themselves - does it compile with `nvcc`, does the kernel launch, does it
-produce correct output on a Volta/Ampere GPU - is unverified and must be
-checked on real hardware before being trusted.
+**`deepcore-gpu-selftest` has been built and run on real hardware.** Built
+with `-DDEEPCORE_WITH_CUDA=ON` (CUDA Toolkit 12.4, `nvcc`) and run on a
+machine with a Quadro GV100 GPU (Volta, `sm_70`, compute capability 7.0).
+All 4 recorded test vectors passed byte-for-byte (both `final_hash` and
+`mix_hash`) against the CPU reference. This confirms `progpowz_kernel.cu`
+and `gpu_selftest.cu` compile with `nvcc`, the kernel launches, and it
+produces correct output on real Volta hardware. Ampere (`sm_80`) and other
+architectures remain unverified on real hardware.
 
 ## What does NOT exist yet
 
@@ -95,18 +93,15 @@ checked on real hardware before being trusted.
 
 ## Next steps, in order
 
-1. Get this code onto a machine with the CUDA Toolkit and a Volta or
-   Ampere GPU (matching the project's actual hardware: Tesla V100-SXM2 /
-   Tesla A100). The kernel and its self-test already exist
-   (`progpowz_kernel.cu`, `tools/cuda_selftest/gpu_selftest.cu`) - configure
-   with `-DDEEPCORE_WITH_CUDA=ON`, build the `deepcore-gpu-selftest` target,
-   and run it. This is the first real "does this run correctly on a GPU"
-   gate, and it has not been exercised anywhere yet. Expect to find and fix
-   real bugs here (nvcc compile errors, launch failures, or wrong output) -
-   the CPU self-test already caught three subtle algorithm bugs before it
-   passed; there is no reason to assume the CUDA-specific parts (kernel
-   launch config, memory transfers, `__CUDA_ARCH__`-gated intrinsics) are
-   bug-free on the first try either.
+1. **Done on Volta.** Built and run on a machine with the CUDA Toolkit and
+   a Quadro GV100 (Volta, `sm_70`) - configured with `-DDEEPCORE_WITH_CUDA=ON`,
+   built the `deepcore-gpu-selftest` target, and ran it. All 4 test vectors
+   passed byte-for-byte against the CPU reference: `progpowz_kernel.cu`
+   compiles with `nvcc`, the kernel launches, and it produces correct output
+   on real Volta hardware. Still to do: exercise this same gate on Ampere
+   (matching the project's actual target hardware: Tesla V100-SXM2 / Tesla
+   A100) and other `CMAKE_CUDA_ARCHITECTURES` this project targets, since
+   passing on one architecture does not guarantee correctness on another.
 2. Only after (1) passes: build the full-dataset (precomputed DAG in
    VRAM) path for real mining throughput, sized dynamically from queried
    free VRAM (see `gpu_manager.hpp`'s telemetry interface) - never a
