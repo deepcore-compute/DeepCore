@@ -3,9 +3,10 @@
 ## Status
 
 **Wire protocol: implemented and validated (26 self-test checks).**
-**Transport: implemented and validated end-to-end against a mock server (14 self-test checks). NOT yet tested against a real zanod daemon.**
+**Transport: implemented and validated end-to-end against a mock server (14 self-test checks) AND against a real zanod testnet daemon.**
+**Mining glue (`src/mining/progpowz_work.*`): implemented, 17 self-test checks, and exercised live in the same real-daemon run.**
 
-Three layers, built and proven in order (same discipline as `src/cuda/`:
+Four layers, built and proven in order (same discipline as `src/cuda/`:
 prove each layer before trusting the next one):
 
 1. `zano_stratum_protocol.{hpp,cpp}` - pure encode/decode for zanod's
@@ -14,12 +15,43 @@ prove each layer before trusting the next one):
    against hand-verified wire strings independent of our own encoder.
 2. `zano_stratum_client.{hpp,cpp}` (`ZanoStratumClient`) - a concrete
    `IStratumClient` (see `stratum_client.hpp`) built on plain TCP sockets
-   and layer 1. Validated by `deepcore-network-selftest`, which runs a
-   minimal mock server (also built with layer 1's helpers) and drives the
-   real client through connect -> login -> receive work -> submit a share
-   -> receive a result -> shutdown.
-3. Not started: wiring this into an actual mining loop that takes real
-   GPU-computed proofs and drives `ZanoStratumClient`, and a CLI.
+   and layer 1. Validated by `deepcore-network-selftest` against a mock
+   server, then for real (see below).
+3. `../mining/progpowz_work.{hpp,cpp}` - parses a job, checks a computed
+   hash against its target, formats a share submission. Validated by
+   `deepcore-mining-selftest`, then for real (see below).
+4. Not started: a real end-to-end mining loop (persistent GPU-driven nonce
+   search wired to the pool client) and a CLI. The real-daemon run below
+   used a small ad-hoc CPU search, not the production loop.
+
+### Real-daemon validation (2026-08-15)
+
+Built an actual `zanod` testnet binary from source (`hyle-team/zano`,
+commit `ee3de1e`, via `cmake -D TESTNET=TRUE`) and ran it locally with
+`--stratum --stratum-always-online --stratum-miner-address=<testnet addr>`
+(`--stratum-always-online` was needed because this environment's network
+policy blocks the P2P port, so the node can't sync to real peers - the
+flag makes the stratum server treat the core as synchronized regardless,
+which still exercises the real share-verification code path, just against
+a single-node genesis chain rather than the live public testnet).
+
+Pointed a small integration program (not a committed self-test - it
+depends on an external live process) using our real `ZanoStratumClient`
+and `progpowz_work` at `127.0.0.1:18899`. Result, confirmed from **both**
+sides:
+
+- Client-side: connected, logged in, received a real job, computed a
+  passing hash with `progpowz_hash_light`, submitted it, received
+  `ShareResultStatus::Accepted` back.
+- Daemon-side log, independently: `WORKER realtest: block found ... at
+  height 1 ... found block ... was successfully added to the blockchain`
+  - the daemon didn't just accept the share, it verified and added the
+  resulting block to its own chain. This happened twice (heights 1 and 2)
+  across two runs.
+
+This is the strongest validation available without live public-testnet
+access: real daemon binary, real consensus/verification code, real
+protocol exchange - not a mock, not an assumption from reading source.
 
 ## What this milestone does NOT cover (real, tracked gaps)
 
@@ -43,12 +75,14 @@ prove each layer before trusting the next one):
   real-tested (`deepcore-network-selftest` passes reliably, run 5x with no
   flakiness); the `#ifdef _WIN32` branches mirror the same logic but are
   unverified - same honesty policy as the CUDA kernel's Ampere gap.
-- **Never tested against a real zanod.** The mock server in
-  `tools/network_selftest` proves the client speaks the protocol
-  correctly, not that a real daemon accepts it. See the root-level
-  discussion of setting up `zanod --stratum` on a testnet build (e.g. via
-  `canardleteer/zano-docker` with `-D TESTNET=TRUE`) for the next real
-  validation step.
+- **Real-daemon validation so far is a single-node, unsynced-to-the-public-
+  network genesis chain** (`--stratum-always-online`, no real peers - see
+  above), not the live public testnet with its real difficulty and other
+  miners. It proves the protocol/verification path is genuinely correct,
+  not that this client behaves correctly under real network conditions
+  (real difficulty retargeting, competing miners, stale work from a
+  fast-moving chain). Testing against the actual public testnet (or a
+  node that's synced to it) is still a real, separate gap.
 
 ## Design notes worth knowing
 
@@ -71,17 +105,20 @@ prove each layer before trusting the next one):
 
 ## Next steps, in order
 
-1. Get a real `zanod --stratum` testnet node running (see root project
-   discussion) and point `deepcore-network-selftest`-style checks at it
-   instead of the mock server - the actual "does a real daemon accept
-   this" gate.
-2. Build the ProgPowZ mining-loop glue: parse `JobNotification::raw_payload`
-   into a `WorkPayload`, drive the GPU kernel with it, construct
-   `ShareSubmission`s from results that clear the target boundary.
-3. Only after (1)+(2) work end-to-end on testnet: reconnect/backoff,
-   multi-endpoint failover, TLS, keepalive, CLI wiring.
+1. **Done.** Real `zanod` daemon, real share acceptance, real blocks
+   added to its chain - see "Real-daemon validation" above.
+2. **Done.** `progpowz_work` mining glue - built, self-tested, and
+   exercised live in the same real-daemon run.
+3. Build the actual production mining loop: persistent GPU-driven nonce
+   search (using the CUDA kernel, not the ad-hoc CPU search used for the
+   validation above) continuously fed by `ZanoStratumClient`'s jobs,
+   submitting through the same client. Test it against the real daemon
+   again once it exists.
+4. Only after (3) works end-to-end: reconnect/backoff, multi-endpoint
+   failover, TLS, keepalive, CLI wiring, and validation against the real
+   public testnet (not just a single-node genesis chain).
 
-Do not skip ahead to (3) before (1) and (2) are proven - a transport that
-only knows how to fail over between endpoints it has never successfully
+Do not skip ahead to (4) before (3) is proven - a transport that only
+knows how to fail over between endpoints it has never successfully
 talked to a real daemon on is not meaningfully more "production-ready,"
 just more complex.
