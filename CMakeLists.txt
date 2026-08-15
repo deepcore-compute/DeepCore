@@ -369,6 +369,40 @@ if(DEEPCORE_BUILD_NETWORK_PROTOCOL)
         tools/protocol_selftest/protocol_selftest.cpp
     )
     target_link_libraries(deepcore-protocol-selftest PRIVATE zano-stratum-protocol)
+
+    # TCP transport for the wire protocol above. Plain sockets (POSIX now;
+    # Winsock code is written but has not been built/run on Windows - see
+    # src/network/README.md) rather than a full async library, matching
+    # this milestone's scope. Needs the stratum_client.hpp interface
+    # target's include dir but not the interface's own compiled sources
+    # (it's header-only).
+    add_library(zano-stratum-client STATIC
+        src/network/zano_stratum_client.cpp
+    )
+    target_include_directories(zano-stratum-client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(zano-stratum-client PUBLIC zano-stratum-protocol)
+    target_link_libraries(zano-stratum-client PRIVATE
+        $<$<PLATFORM_ID:Windows>:ws2_32>
+    )
+    target_compile_options(zano-stratum-client PRIVATE
+        $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-Wall -Wextra -Wpedantic>
+        $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    )
+    set_target_properties(zano-stratum-client PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
+    )
+
+    # End-to-end transport test against a local mock server (see that
+    # tool's header comment) - no real zanod daemon or network access
+    # required or used.
+    add_executable(deepcore-network-selftest
+        tools/network_selftest/network_selftest.cpp
+    )
+    target_link_libraries(deepcore-network-selftest PRIVATE zano-stratum-client)
+    target_link_libraries(deepcore-network-selftest PRIVATE
+        $<$<PLATFORM_ID:Windows>:ws2_32>
+    )
 endif()
 
 # -----------------------------------------------------------------------------
