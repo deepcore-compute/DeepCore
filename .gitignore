@@ -1,0 +1,143 @@
+# ---------------------------------------------------------------------------
+# DeepCore .gitignore
+# Cross-platform C++20 project (Linux/GCC/Clang, Windows/MSVC, HiveOS)
+# ---------------------------------------------------------------------------
+
+# ----- Build directories -----------------------------------------------
+build/
+build-*/
+out/
+cmake-build-*/
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+x64/
+x86/
+bin/
+obj/
+
+# ----- CMake generated files --------------------------------------------
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Testing/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+CPackConfig.cmake
+CPackSourceConfig.cmake
+*.cmake.bak
+
+# ----- Object files, libraries, executables ------------------------------
+*.o
+*.obj
+*.lo
+*.slo
+*.a
+*.la
+*.lai
+*.so
+*.so.*
+*.dylib
+*.dll
+*.lib
+*.exe
+*.out
+*.app
+*.exp
+*.ilk
+
+# ----- Debug symbols and PDBs --------------------------------------------
+*.pdb
+*.idb
+*.dSYM/
+*.su
+*.map
+
+# ----- Precompiled headers -------------------------------------------------
+*.gch
+*.pch
+
+# ----- Visual Studio ---------------------------------------------------
+.vs/
+*.sln.docstates
+*.vcxproj.user
+*.vcxproj.filters
+*.suo
+*.user
+*.userosscache
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.VC.opendb
+ipch/
+
+# ----- Visual Studio Code -------------------------------------------------
+.vscode/
+!.vscode/extensions.json
+
+# ----- Cursor -------------------------------------------------------------
+.cursor/
+.cursorignore.local
+
+# ----- JetBrains / CLion ---------------------------------------------------
+.idea/
+cmake-build-debug/
+cmake-build-release/
+
+# ----- Caches, logs, coverage ----------------------------------------------
+*.log
+*.tlog
+logs/
+*.cache
+.cache/
+*.gcda
+*.gcno
+*.gcov
+coverage/
+*.profraw
+*.profdata
+*.lcov
+
+# ----- Packaging / release output -------------------------------------
+*.zip
+*.tar.gz
+*.tar.xz
+*.7z
+*.deb
+*.rpm
+*.msi
+*.appimage
+*.AppImage
+dist/
+packages/
+release/
+*.sha256
+*.sig
+!checksums/*.sha256.example
+
+# ----- Secrets, credentials, environment files ------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!*.pub.key
+secrets.*
+credentials.*
+*.local.json
+config.local.*
+
+# ----- OS artifacts ------------------------------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ----- Misc toolchain / package manager --------------------------------
+vcpkg_installed/
+.conan/
+conan.lock
+CMakeUserPresets.json

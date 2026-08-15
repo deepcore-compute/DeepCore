@@ -1,0 +1,422 @@
+cmake_minimum_required(VERSION 3.20)
+
+# -----------------------------------------------------------------------------
+# DeepCore - multi-coin NVIDIA GPU mining application
+#
+# This is the Phase 2 scaffolding build. Only header interfaces exist so far
+# (src/hardware/gpu_manager.hpp, src/network/stratum_client.hpp); the CUDA
+# kernels, coin-specific proof logic, and networking backend are intentionally
+# not implemented yet. This file is written so that:
+#   - it configures and builds cleanly with only the current stub sources
+#   - future CUDA backends, JSON/networking libraries, and coin modules can be
+#     added without restructuring the top-level layout
+# -----------------------------------------------------------------------------
+
+# C is needed alongside C++ only for the vendored ProgPowZ reference code
+# under third_party/ethash-progpow-ref, which has a handful of plain-C
+# source files (Keccak permutation, prime-search helpers). deepcore-miner
+# itself is pure C++.
+#
+# LANGUAGES NONE: C and CXX are enabled further down, after the CUDA
+# host-compiler compatibility guard below has had a chance to run. That
+# guard sometimes needs to select a specific CXX/C compiler *before* those
+# languages are first enabled - once enable_language(CXX)/(C) has run,
+# CMAKE_CXX_COMPILER/CMAKE_C_COMPILER are locked in for the rest of this
+# configure run, so the guard would be too late if it ran afterward.
+project(DeepCore
+    VERSION 0.1.0
+    DESCRIPTION "DeepCore multi-coin NVIDIA GPU miner"
+    LANGUAGES NONE
+)
+
+# -----------------------------------------------------------------------------
+# Build options
+# -----------------------------------------------------------------------------
+
+# -march=native binds the binary to the build host's CPU instruction set
+# (AVX2/AVX-512/etc.). This is fastest for a machine that builds and runs on
+# itself (e.g. a HiveOS rig building locally), but it is NOT portable: a
+# binary built with -march=native on one CPU can SIGILL on another. It must
+# stay OFF for any binary that will be redistributed (releases, HiveOS
+# packages) and reproducible-build checksums must be generated with it OFF.
+option(DEEPCORE_ENABLE_NATIVE_OPT "GCC/Clang only: enable -march=native and -ffast-math (breaks portability & FP determinism, local-build-only)" OFF)
+
+# A ProgPowZ CUDA kernel (src/cuda/progpowz_kernel.cu) exists; its algorithm
+# core is validated on CPU and (as of the last real-hardware run recorded in
+# src/cuda/README.md) the GPU kernel itself has also been validated on real
+# Volta hardware. This flag stays OFF by default so a plain CPU-only build
+# never depends on a CUDA Toolkit being present. When turned ON without a
+# working CUDA Toolkit installed, configuration degrades gracefully (a
+# warning, CUDA targets skipped) rather than failing - see the
+# check_language(CUDA) guard below. When a CUDA Toolkit *is* found but its
+# nvcc does not support this machine's default C++ compiler as a host
+# compiler, configuration fails with a clear, actionable error instead of
+# silently building a mismatched binary that only fails at link time - see
+# the "CUDA host-compiler compatibility guard" section below for why.
+option(DEEPCORE_WITH_CUDA "Enable CUDA language/backend and build GPU kernel targets (requires the CUDA Toolkit)" OFF)
+
+# -----------------------------------------------------------------------------
+# CUDA host-compiler compatibility guard
+#
+# Background (the bug this guard exists to catch): nvcc only supports host
+# C++ compilers up to some maximum version per CUDA Toolkit release. When
+# CMake enables the CUDA language and the *system default* C++ compiler
+# (e.g. `c++`/`g++`, whatever that resolves to) is too new for the detected
+# CUDA Toolkit, CMake's own CUDA-compiler detection can silently fall back
+# to a *different, older* host compiler for `.cu` translation units only -
+# without that ever being surfaced to the rest of the project. The CUDA
+# kernel then compiles fine and configuration succeeds with no warning at
+# all. But every non-CUDA C++ translation unit in the same build (here:
+# third_party/ethash-progpow-ref, linked into deepcore-gpu-selftest) is
+# still compiled with the original, newer default compiler. Linking
+# objects produced by two different major compiler versions into one
+# binary is not guaranteed to be ABI-compatible, and when it isn't, the
+# failure shows up only at the *final link* step, as an opaque undefined
+# reference (e.g. `__cxa_call_terminate`) - by which point it looks nothing
+# like a compiler-version problem.
+#
+# This guard runs *before* CXX/C are enabled (see the `LANGUAGES NONE`
+# project() above) so that, when a mismatch is detected, it can either
+# select a different CXX/C compiler for the *entire* project (not just the
+# CUDA translation units - that is what actually prevents the ABI mismatch,
+# since nvcc's own host-compiler choice alone cannot fix objects compiled
+# elsewhere with a different compiler), or fail configuration outright with
+# a clear explanation, rather than letting the mismatch surface later as a
+# confusing link error.
+# -----------------------------------------------------------------------------
+
+set(DEEPCORE_CUDA_COMPILER_FOUND FALSE)
+
+if(DEEPCORE_WITH_CUDA)
+    include(CheckLanguage)
+    check_language(CUDA)
+
+    if(CMAKE_CUDA_COMPILER)
+        set(DEEPCORE_CUDA_COMPILER_FOUND TRUE)
+
+        # Returns TRUE/FALSE in ${out_var}: can nvcc actually use
+        # ${compiler} as its -ccbin host compiler? Determined by literally
+        # trying it on a trivial .cu file, rather than hard-coding a
+        # CUDA-version-to-GCC-version compatibility table that would need
+        # ongoing maintenance as new toolkit/compiler releases ship.
+        function(deepcore_nvcc_accepts_host_compiler compiler out_var error_out_var)
+            set(_probe_dir "${CMAKE_BINARY_DIR}/CMakeFiles/deepcore_cuda_hostcc_probe")
+            file(MAKE_DIRECTORY "${_probe_dir}")
+            set(_probe_src "${_probe_dir}/probe.cu")
+            file(WRITE "${_probe_src}" "__global__ void deepcore_hostcc_probe_kernel() {}\n")
+            execute_process(
+                COMMAND "${CMAKE_CUDA_COMPILER}" -ccbin "${compiler}" -c "${_probe_src}"
+                        -o "${_probe_dir}/probe.o"
+                RESULT_VARIABLE _probe_rc
+                OUTPUT_VARIABLE _probe_out
+                ERROR_VARIABLE _probe_err
+            )
+            if(_probe_rc EQUAL 0)
+                set(${out_var} TRUE PARENT_SCOPE)
+                set(${error_out_var} "" PARENT_SCOPE)
+            else()
+                set(${out_var} FALSE PARENT_SCOPE)
+                set(${error_out_var} "${_probe_out}\n${_probe_err}" PARENT_SCOPE)
+            endif()
+        endfunction()
+
+        if(DEFINED CACHE{CMAKE_CXX_COMPILER})
+            # User explicitly pinned the compiler (-DCMAKE_CXX_COMPILER=...).
+            # Respect that choice rather than silently overriding it -
+            # just validate it and fail clearly if it will not work.
+            set(_deepcore_candidate "$CACHE{CMAKE_CXX_COMPILER}")
+            deepcore_nvcc_accepts_host_compiler("${_deepcore_candidate}" _deepcore_ok _deepcore_probe_err)
+            if(NOT _deepcore_ok)
+                message(FATAL_ERROR
+                    "DEEPCORE_WITH_CUDA is ON, but the detected CUDA Toolkit's "
+                    "nvcc (${CMAKE_CUDA_COMPILER}) rejects the explicitly "
+                    "pinned CMAKE_CXX_COMPILER (${_deepcore_candidate}) as a "
+                    "host compiler - usually because it is newer than this "
+                    "CUDA Toolkit release supports. Building anyway would not "
+                    "fail cleanly: CMake can silently compile .cu files with a "
+                    "different, older host compiler than the rest of the "
+                    "project, producing ABI-mismatched objects that only fail "
+                    "at link time (e.g. undefined reference to "
+                    "__cxa_call_terminate).\n\n"
+                    "nvcc's own error compiling with this host compiler:\n"
+                    "${_deepcore_probe_err}\n\n"
+                    "Fix: reconfigure with an older, CUDA-Toolkit-supported "
+                    "host compiler pair, e.g.:\n"
+                    "  cmake -S . -B build -DDEEPCORE_WITH_CUDA=ON "
+                    "-DCMAKE_CXX_COMPILER=g++-<N> -DCMAKE_C_COMPILER=gcc-<N>\n"
+                    "(install a compatible g++-<N>/gcc-<N> pair first if none "
+                    "is present - check the CUDA Toolkit's release notes for "
+                    "the maximum supported host compiler version).")
+            endif()
+        else()
+            # No explicit pin: probe the default compiler CMake would
+            # otherwise select (`c++`/`cc` on the PATH), and if that is not
+            # accepted by nvcc, search installed g++-N/gcc-N pairs
+            # (newest-compatible-first) and pre-seed CMAKE_CXX_COMPILER /
+            # CMAKE_C_COMPILER with the first pair that works - for the
+            # *whole* project, which is what actually avoids the
+            # ABI-mismatch link failure this guard exists to prevent.
+            find_program(_deepcore_default_cxx NAMES c++ g++)
+            set(_deepcore_ok FALSE)
+            if(_deepcore_default_cxx)
+                deepcore_nvcc_accepts_host_compiler("${_deepcore_default_cxx}" _deepcore_ok _deepcore_probe_err)
+            endif()
+
+            if(_deepcore_ok)
+                message(STATUS "DEEPCORE_WITH_CUDA: default CXX compiler "
+                                "(${_deepcore_default_cxx}) is accepted by nvcc "
+                                "(${CMAKE_CUDA_COMPILER}) as a host compiler - "
+                                "using it for the whole project.")
+            else()
+                set(_deepcore_candidate_versions 16 15 14 13 12 11 10 9)
+                set(_deepcore_found_version "")
+                foreach(_v IN LISTS _deepcore_candidate_versions)
+                    unset(_deepcore_gxx_candidate CACHE)
+                    unset(_deepcore_gcc_candidate CACHE)
+                    find_program(_deepcore_gxx_candidate g++-${_v})
+                    find_program(_deepcore_gcc_candidate gcc-${_v})
+                    if(_deepcore_gxx_candidate AND _deepcore_gcc_candidate)
+                        deepcore_nvcc_accepts_host_compiler("${_deepcore_gxx_candidate}" _deepcore_v_ok _deepcore_v_err)
+                        if(_deepcore_v_ok)
+                            set(CMAKE_CXX_COMPILER "${_deepcore_gxx_candidate}" CACHE STRING "" FORCE)
+                            set(CMAKE_C_COMPILER "${_deepcore_gcc_candidate}" CACHE STRING "" FORCE)
+                            set(_deepcore_found_version "${_v}")
+                            break()
+                        endif()
+                    endif()
+                endforeach()
+
+                if(_deepcore_found_version)
+                    message(STATUS "DEEPCORE_WITH_CUDA: default CXX compiler "
+                                    "(${_deepcore_default_cxx}) is too new for "
+                                    "nvcc (${CMAKE_CUDA_COMPILER}); auto-selected "
+                                    "g++-${_deepcore_found_version}/"
+                                    "gcc-${_deepcore_found_version} instead, and "
+                                    "will build the ENTIRE project with it (not "
+                                    "just the CUDA translation units) to avoid "
+                                    "ABI-mismatched objects at link time.")
+                else()
+                    message(FATAL_ERROR
+                        "DEEPCORE_WITH_CUDA is ON and a CUDA Toolkit was found "
+                        "(${CMAKE_CUDA_COMPILER}), but its nvcc rejects this "
+                        "machine's default C++ compiler "
+                        "(${_deepcore_default_cxx}) as a host compiler, and no "
+                        "installed g++-<N>/gcc-<N> pair (tried versions "
+                        "16 down to 9) was accepted as a replacement either.\n\n"
+                        "nvcc's error compiling with the default compiler:\n"
+                        "${_deepcore_probe_err}\n\n"
+                        "Fix: install a g++/gcc version pair this CUDA Toolkit "
+                        "supports (check its release notes for the maximum "
+                        "supported host compiler version), e.g.:\n"
+                        "  sudo apt-get install g++-13 gcc-13\n"
+                        "then reconfigure (either let this guard auto-select it, "
+                        "or pin it explicitly with -DCMAKE_CXX_COMPILER=g++-13 "
+                        "-DCMAKE_C_COMPILER=gcc-13), or disable CUDA entirely "
+                        "with -DDEEPCORE_WITH_CUDA=OFF.")
+                endif()
+            endif()
+        endif()
+    else()
+        message(WARNING "DEEPCORE_WITH_CUDA is ON but no CUDA compiler was found - GPU kernel targets will be skipped.")
+    endif()
+endif()
+
+# ----- Now that the compiler pair is finalized, enable C/CXX -----------------
+enable_language(C)
+enable_language(CXX)
+
+# ----- Language standard ----------------------------------------------------
+# C++20, no compiler-specific extensions (portable -std=c++20 / /std:c++20).
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Emit compile_commands.json for tooling (clangd, IDE indexers). Harmless if unused.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Default to a Release build when the generator supports single-config builds
+# (Makefiles/Ninja) and nothing was specified. Multi-config generators
+# (Visual Studio) ignore CMAKE_BUILD_TYPE and use --config instead.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+endif()
+
+# ----- Finish enabling CUDA, now that CXX/C (and therefore the host compiler
+# CUDA must match) are settled ------------------------------------------------
+if(DEEPCORE_WITH_CUDA AND DEEPCORE_CUDA_COMPILER_FOUND)
+    enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+    # Pin nvcc's host compiler to exactly match CMAKE_CXX_COMPILER (settled,
+    # and already verified compatible, above). This is the crux of the whole
+    # guard: without it, CMake may silently pick a *different* host compiler
+    # for CUDA sources than CMAKE_CXX_COMPILER, which is exactly how the
+    # link-time ABI mismatch this guard exists to prevent happened before.
+    set(CMAKE_CUDA_HOST_COMPILER "${CMAKE_CXX_COMPILER}")
+
+    if(NOT CMAKE_CUDA_ARCHITECTURES)
+        # This project's actual GPU fleet: Tesla V100-SXM2 (Volta,
+        # sm_70) and Tesla A100 (Ampere, sm_80). Extend this list only
+        # when a new architecture has real hardware to validate kernels
+        # against - see the "refuse to start on an unsupported GPU"
+        # requirement in the project's hardware-support policy.
+        set(CMAKE_CUDA_ARCHITECTURES "70;80")
+    endif()
+endif()
+
+# ----- Core target -----------------------------------------------------------
+add_executable(deepcore-miner
+    src/main.cpp
+)
+
+target_include_directories(deepcore-miner PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_definitions(deepcore-miner PRIVATE
+    DEEPCORE_VERSION_STRING="${PROJECT_VERSION}"
+)
+
+# GPU vendor SDKs (CUDA Toolkit, NVML) are deliberately NOT find_package()'d
+# here. The GPU backend is designed around dynamic driver loading at runtime
+# (dlopen()/dlsym() on Linux, LoadLibrary()/GetProcAddress() on Windows
+# against libcuda.so / nvcuda.dll and libnvidia-ml.so / nvml.dll) so that the
+# miner builds and runs on machines without the CUDA Toolkit installed, and
+# so a HiveOS package does not need to bundle the Toolkit. When the dynamic
+# loader implementation is added under src/hardware/, link the platform's
+# dynamic-loading library here:
+if(UNIX AND NOT APPLE)
+    target_link_libraries(deepcore-miner PRIVATE ${CMAKE_DL_LIBS})
+endif()
+# On Windows, LoadLibrary/GetProcAddress live in kernel32, which is linked by
+# default - no extra target_link_libraries entry is needed there.
+
+# -----------------------------------------------------------------------------
+# Compiler warnings (compiler-specific, via generator expressions)
+# -----------------------------------------------------------------------------
+target_compile_options(deepcore-miner PRIVATE
+    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-Wall -Wextra -Wpedantic>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+)
+
+# -----------------------------------------------------------------------------
+# Release optimization flags
+#
+# GCC/Clang and MSVC accept different flag syntax, so each is scoped with a
+# CXX_COMPILER_ID generator expression rather than set globally - a global
+# CMAKE_CXX_FLAGS would otherwise pass GCC-style flags to MSVC and fail.
+# -----------------------------------------------------------------------------
+
+# GCC/Clang: -O3 always for Release. -ffast-math and -march=native are gated
+# behind DEEPCORE_ENABLE_NATIVE_OPT since they are unsafe for redistributable
+# binaries (see option() comment above). NOTE: -ffast-math relaxes IEEE-754
+# semantics; it must be re-scoped OFF for any translation unit implementing
+# consensus-critical hashing/proof code once that code exists, even when this
+# option is enabled for the rest of the miner.
+target_compile_options(deepcore-miner PRIVATE
+    $<$<AND:$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>>:-O3>
+    $<$<AND:$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>,$<BOOL:${DEEPCORE_ENABLE_NATIVE_OPT}>>:-ffast-math -march=native>
+)
+
+# MSVC: standard Release optimizations (/O2 maximize speed, /Oi intrinsics,
+# /GL whole-program optimization) plus matching /LTCG at link time. No GCC
+# flags are ever passed here.
+target_compile_options(deepcore-miner PRIVATE
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/O2 /Oi /GL>
+)
+target_link_options(deepcore-miner PRIVATE
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/LTCG>
+)
+
+# -----------------------------------------------------------------------------
+# ProgPowZ correctness reference (vendored, unmodified third-party code)
+#
+# This is Zano's own ProgPoW/Ethash reference implementation (see
+# third_party/ethash-progpow-ref/README.md for provenance and license). It
+# is built as a small, separate static library so the correctness-checking
+# tool below can link it - it is never linked into deepcore-miner itself.
+# -----------------------------------------------------------------------------
+option(DEEPCORE_BUILD_REFERENCE_TOOLS "Build the vendored ProgPowZ reference and its test-vector generator" ON)
+
+if(DEEPCORE_BUILD_REFERENCE_TOOLS)
+    set(ETHASH_REF_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ethash-progpow-ref)
+
+    add_library(ethash-progpow-ref STATIC
+        ${ETHASH_REF_DIR}/ethash.cpp
+        ${ETHASH_REF_DIR}/managed.cpp
+        ${ETHASH_REF_DIR}/progpow.cpp
+        ${ETHASH_REF_DIR}/keccak.c
+        ${ETHASH_REF_DIR}/keccakf800.c
+        ${ETHASH_REF_DIR}/keccakf1600.c
+        ${ETHASH_REF_DIR}/primes.c
+    )
+
+    # Vendored code as-is (see README.md: "not modified from upstream"), so
+    # it is not held to this project's own warning/standard settings -
+    # C++17 is what upstream targets and is fully valid to compile under a
+    # C++20 toolchain without changes.
+    target_include_directories(ethash-progpow-ref SYSTEM PUBLIC ${ETHASH_REF_DIR})
+    set_target_properties(ethash-progpow-ref PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+    )
+
+    add_executable(deepcore-gen-vectors
+        tools/reference/gen_vectors.cpp
+    )
+    target_link_libraries(deepcore-gen-vectors PRIVATE ethash-progpow-ref)
+    set_target_properties(deepcore-gen-vectors PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+    )
+
+    # CPU-only correctness check for src/cuda/progpowz_portable.hpp (see
+    # that file's header comment): compares our portable, host/device
+    # -callable ProgPowZ port against the unmodified reference
+    # implementation, with zero CUDA toolchain dependency. This must pass
+    # before any CUDA kernel built on top of progpowz_portable.hpp can be
+    # trusted.
+    add_executable(deepcore-cuda-selftest
+        tools/cuda_selftest/cuda_selftest.cpp
+    )
+    target_link_libraries(deepcore-cuda-selftest PRIVATE ethash-progpow-ref)
+    target_include_directories(deepcore-cuda-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda)
+    set_target_properties(deepcore-cuda-selftest PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+    )
+
+    # Actual GPU correctness gate (see tools/cuda_selftest/gpu_selftest.cu
+    # header comment) - only built when a CUDA compiler was actually found
+    # above. This is the target that must be run on real Volta/Ampere
+    # hardware before src/cuda/progpowz_kernel.cu can be trusted at all.
+    if(DEEPCORE_WITH_CUDA AND CMAKE_CUDA_COMPILER)
+        add_executable(deepcore-gpu-selftest
+            tools/cuda_selftest/gpu_selftest.cu
+        )
+        target_link_libraries(deepcore-gpu-selftest PRIVATE ethash-progpow-ref)
+        target_include_directories(deepcore-gpu-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda)
+        set_target_properties(deepcore-gpu-selftest PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED ON
+        )
+    endif()
+endif()
+
+# -----------------------------------------------------------------------------
+# Future extension points (documented, not yet wired up):
+#   - enable_language(CUDA) + per-architecture object libraries under
+#     src/cuda/sm_60, sm_70, sm_75, sm_80_86, sm_89, sm_90, sm_100_120,
+#     selected via CMAKE_CUDA_ARCHITECTURES per build, once kernels exist.
+#   - A JSON + async networking dependency (e.g. vcpkg/FetchContent-provided)
+#     for src/network/stratum_client.cpp, kept out of this header-only phase.
+#   - install()/CPack rules for Linux tarball + checksum + SBOM generation,
+#     and a separate hiveos/ packaging step, once there is a real binary to
+#     package.
+# -----------------------------------------------------------------------------
+
+install(TARGETS deepcore-miner RUNTIME DESTINATION bin)
