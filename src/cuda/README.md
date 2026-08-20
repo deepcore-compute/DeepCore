@@ -125,7 +125,8 @@ rather than a new correctness gap.
 
 ## Persistent VRAM caching (GPU throughput milestone 1)
 
-**Written, NOT yet validated on real hardware.**
+**Validated on real hardware (Quadro GV100): all 14 self-test checks
+pass, including the new I1/I2 cache-identity checks.**
 
 `GpuHashSearchBackend` previously re-uploaded the epoch's `light_cache`/
 `l1_cache` (tens of MB) to the GPU on every `search()` batch. Real-world
@@ -197,10 +198,10 @@ lookup, which is what the full-DAG kernel below actually replaces.
    and fixed two real bugs along the way (byte-order, response-shape) -
    see `src/network/README.md`. Real hashrate confirmed: ~13 KH/s, vs.
    ~38 MH/s for a competitive kernel (Rigel) on the same GV100.
-4. **In progress.** Persistent VRAM caching (upload the epoch's caches
-   once, not once per batch) - written, see above, not yet validated on
-   real hardware.
-5. The actual throughput lever, not yet started: the full-dataset
+4. **Done.** Persistent VRAM caching (upload the epoch's caches once, not
+   once per batch) - validated on a real Quadro GV100, all 14 self-test
+   checks pass, see above.
+5. **In progress.** The actual throughput lever: the full-dataset
    (precomputed DAG in VRAM, O(1) lookups instead of recompute-on-demand)
    path, sized dynamically from queried free VRAM (see
    `gpu_manager.hpp`'s telemetry interface, never a hard-coded capacity
