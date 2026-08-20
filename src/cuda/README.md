@@ -76,6 +76,39 @@ and `gpu_selftest.cu` compile with `nvcc`, the kernel launches, and it
 produces correct output on real Volta hardware. Ampere (`sm_80`) and other
 architectures remain unverified on real hardware.
 
+## `GpuHashSearchBackend` (GPU milestone 2: mining_loop integration)
+
+**Written, NOT yet validated on real hardware.**
+
+`progpowz_gpu_backend.{hpp,cu}` wraps `run_progpowz_light_gpu` (above) in a
+`mining::IHashSearchBackend` (see `src/mining/mining_loop.hpp`) - the
+adapter that lets `MiningLoop` actually drive this kernel, in place of the
+CPU reference backend. `tools/gpu_backend_selftest/gpu_backend_selftest.cu`
+is the validation gate for this layer, same role `gpu_selftest.cu` played
+for milestone 1: it drives the backend through known-answer searches
+(a target constructed from a nonce's own reference-computed hash, so the
+expected winner is known ahead of time), checks cancellation and a
+not-found case, and cross-checks its result against `CpuHashSearchBackend`
+on the same job/range. Must be built with `nvcc` and run on real hardware
+before `GpuHashSearchBackend` is trusted - not done yet.
+
+Scope of this milestone, deliberately: still the "light" (recompute-on-
+demand) kernel, and no persistent device memory - the epoch's caches are
+re-uploaded to the GPU on every `search()` call, same as the kernel wrapper
+it calls. A GPU-driven `MiningLoop` worker thread using this backend is
+correctly wired but not yet fast; see "What does NOT exist yet" below for
+what real throughput needs.
+
+`IHashSearchBackend` also gained a `preferred_batch_size()` hook (default
+0 = "no preference") so a backend like this one, whose per-call overhead
+(kernel launch + cache upload) is large relative to per-nonce cost, can
+ask `MiningLoop` for a much bigger batch per `search()` call than the
+CPU backend's tuned default of 64 - `GpuHashSearchBackend` currently
+requests 65536. This does mean coarser cancellation granularity than the
+CPU backend (a CUDA kernel can't be interrupted mid-flight) - see that
+class's header comment for why this is an accepted, documented tradeoff
+rather than a new correctness gap.
+
 ## What does NOT exist yet
 
 - **No full-DAG (mining-speed) kernel.** This only implements the
@@ -84,12 +117,21 @@ architectures remain unverified on real hardware.
   correctness check, but is far too slow per-hash for real mining. A real
   miner needs the full dataset resident in VRAM with O(1) lookups - that
   is a distinct, later performance milestone, not started here.
+- **No persistent device memory in `GpuHashSearchBackend`.** The epoch's
+  light_cache/l1_cache are re-uploaded on every `search()` call rather
+  than kept resident in VRAM across calls for the same epoch - a real
+  performance cost once this backend is otherwise validated.
 - **No lane-cooperative (16 threads/warp via `__shfl_sync`) kernel.** That
   is the real-world performance mapping for ProgPoW on GPU; the
   single-thread-per-hash approach here is deliberately the simpler,
   lower-risk first step.
-- **No nonce-range search loop, no host-side launch/orchestration code,
-  no integration with `gpu_manager.hpp`/`stratum_client.hpp`.**
+- **No CLI wiring.** `deepcore-miner` still always uses
+  `CpuHashSearchBackend` - see `src/cli/README.md`. Selecting
+  `GpuHashSearchBackend` from the CLI is a separate, later step, only
+  after this backend is validated on real hardware.
+- **No multi-GPU support, no integration with `gpu_manager.hpp`** (device
+  enumeration/selection/telemetry) - `GpuHashSearchBackend` drives exactly
+  one CUDA device index passed at construction.
 
 ## Next steps, in order
 
@@ -98,20 +140,25 @@ architectures remain unverified on real hardware.
    built the `deepcore-gpu-selftest` target, and ran it. All 4 test vectors
    passed byte-for-byte against the CPU reference: `progpowz_kernel.cu`
    compiles with `nvcc`, the kernel launches, and it produces correct output
-   on real Volta hardware. Still to do: exercise this same gate on Ampere
-   (matching the project's actual target hardware: Tesla V100-SXM2 / Tesla
-   A100) and other `CMAKE_CUDA_ARCHITECTURES` this project targets, since
-   passing on one architecture does not guarantee correctness on another.
-2. Only after (1) passes: build the full-dataset (precomputed DAG in
-   VRAM) path for real mining throughput, sized dynamically from queried
-   free VRAM (see `gpu_manager.hpp`'s telemetry interface) - never a
-   hard-coded capacity assumption.
-3. Only after (2) is measured working: lane-cooperative warp-shuffle
+   on real Volta hardware. Ampere (`sm_80`, target Tesla A100 hardware) and
+   other `CMAKE_CUDA_ARCHITECTURES` this project targets remain unverified
+   on real hardware.
+2. **In progress.** Validate `GpuHashSearchBackend` for real: build
+   `deepcore-gpu-backend-selftest` with `-DDEEPCORE_WITH_CUDA=ON` and run
+   it on real hardware; fix whatever it finds, same discipline as every
+   other layer in this project.
+3. Only after (2) passes: wire `GpuHashSearchBackend` into `deepcore-miner`
+   (a `--gpu` flag or similar) and validate a live GPU mining run against a
+   real `zanod`, same discipline as the CPU-backend CLI validation in
+   `src/cli/README.md`.
+4. Only after (3) works end-to-end: persistent device memory (upload once
+   per epoch, not once per batch), the full-dataset (precomputed DAG in
+   VRAM) path for real mining throughput sized dynamically from queried
+   free VRAM (see `gpu_manager.hpp`'s telemetry interface, never a
+   hard-coded capacity assumption), lane-cooperative warp-shuffle
    optimization, launch-parameter autotuning per architecture, CUDA
    Graphs / stream overlap, etc.
 
-Do not skip ahead to (2) or (3) before (1) has actually run and passed on
-real hardware - "compiles" and "the CPU-side algorithm is correct" are
-necessary but not sufficient; only real GPU execution can validate the
-kernel launch/memory-transfer code, which is entirely new/untested surface
-that this milestone deliberately did not touch.
+Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
+necessary but not sufficient at each step; only real GPU execution can
+validate what that step actually added.

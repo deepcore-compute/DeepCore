@@ -460,6 +460,25 @@ if(DEEPCORE_BUILD_NETWORK_PROTOCOL AND DEEPCORE_BUILD_REFERENCE_TOOLS)
         tools/mining_loop_selftest/mining_loop_selftest.cpp
     )
     target_link_libraries(deepcore-mining-loop-selftest PRIVATE deepcore-progpowz-work ethash-progpow-ref Threads::Threads)
+
+    # GpuHashSearchBackend (src/cuda/progpowz_gpu_backend.{hpp,cu}) - the
+    # mining_loop-facing GPU backend, wrapping the already real-hardware-
+    # validated progpowz_light_kernel. Same gating as deepcore-gpu-selftest
+    # (only built when a CUDA compiler was actually found) plus needs
+    # deepcore-progpowz-work, hence nested here rather than in the
+    # DEEPCORE_BUILD_REFERENCE_TOOLS block above.
+    if(DEEPCORE_WITH_CUDA AND CMAKE_CUDA_COMPILER)
+        add_executable(deepcore-gpu-backend-selftest
+            tools/gpu_backend_selftest/gpu_backend_selftest.cu
+            src/cuda/progpowz_gpu_backend.cu
+        )
+        target_link_libraries(deepcore-gpu-backend-selftest PRIVATE deepcore-progpowz-work ethash-progpow-ref)
+        target_include_directories(deepcore-gpu-backend-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda)
+        set_target_properties(deepcore-gpu-backend-selftest PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED ON
+        )
+    endif()
 endif()
 
 # -----------------------------------------------------------------------------

@@ -52,6 +52,17 @@ public:
     virtual ~IHashSearchBackend() = default;
     virtual std::optional<FoundShare> search(const ProgPowZJob& job, const ethash::epoch_context& ctx,
         std::uint64_t start_nonce, std::uint64_t count, const std::atomic<bool>& cancelled) = 0;
+
+    // Nonces per search() call this backend performs best with. 0 (the
+    // default) means "no preference" - MiningLoop falls back to its own
+    // CPU-tuned default. A backend whose per-call overhead is large
+    // relative to per-nonce cost (e.g. a GPU kernel launch plus a
+    // cache upload) should override this to a much larger value so that
+    // overhead is amortized across enough work to be worthwhile; see
+    // GpuHashSearchBackend (src/cuda/progpowz_gpu_backend.hpp). A larger
+    // batch also means coarser cancellation granularity - see that
+    // class's header comment for why that's an accepted tradeoff.
+    [[nodiscard]] virtual std::uint64_t preferred_batch_size() const { return 0; }
 };
 
 // Reference CPU backend (progpowz_hash_light). Real and correct, not a

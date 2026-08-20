@@ -113,7 +113,10 @@ std::shared_ptr<MiningLoop::JobState> MiningLoop::current_job_snapshot() const
 
 void MiningLoop::worker_main()
 {
-    constexpr std::uint64_t kBatchSize = 64;  // small: keeps cancellation/shutdown responsive
+    constexpr std::uint64_t kDefaultBatchSize = 64;  // CPU-tuned: keeps cancellation/shutdown responsive
+
+    const std::uint64_t preferred = backend_->preferred_batch_size();
+    const std::uint64_t batch_size = preferred != 0 ? preferred : kDefaultBatchSize;
 
     while (running_.load(std::memory_order_relaxed))
     {
@@ -124,13 +127,13 @@ void MiningLoop::worker_main()
             continue;
         }
 
-        std::uint64_t start_nonce = snapshot->next_nonce.fetch_add(kBatchSize, std::memory_order_relaxed);
-        auto found = backend_->search(snapshot->job, *snapshot->ctx, start_nonce, kBatchSize,
+        std::uint64_t start_nonce = snapshot->next_nonce.fetch_add(batch_size, std::memory_order_relaxed);
+        auto found = backend_->search(snapshot->job, *snapshot->ctx, start_nonce, batch_size,
             *snapshot->cancel_token);
 
         {
             std::lock_guard<std::mutex> lock(counters_mutex_);
-            counters_.hashes_computed += kBatchSize;
+            counters_.hashes_computed += batch_size;
         }
 
         if (found)
