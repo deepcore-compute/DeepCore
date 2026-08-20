@@ -167,7 +167,18 @@ int main()
     // ---- 6. Ok and Error response shapes ----
     {
         auto ok = parse_message(R"({"jsonrpc":"2.0","id":5,"result":true})");
-        check(ok.has_value() && ok->kind == MessageKind::Ok && ok->id == 5, "parses result:true as Ok");
+        check(ok.has_value() && ok->kind == MessageKind::Ok && ok->id == 5, "parses result:true as Ok (zanod's own shape)");
+
+        // Real accept-response shape from LuckyPool (an independent, real
+        // Zano mainnet pool operator - not zanod's own stratum server),
+        // captured via cross-checking against Rigel (a known-working
+        // third-party miner) hitting the same live pool: result is an
+        // object, not a boolean. Confirmed the pool operator's own choice,
+        // not something to special-case as "wrong" - a real, valid
+        // dialect variation this parser must handle.
+        auto ok_object = parse_message(R"({"jsonrpc":"2.0","id":19,"error":null,"result":{"status":"OK"}})");
+        check(ok_object.has_value() && ok_object->kind == MessageKind::Ok && ok_object->id == 19,
+            "parses result:{\"status\":\"OK\"} as Ok (a real pool's shape, not just zanod's)");
 
         auto err = parse_message(R"({"jsonrpc":"2.0","id":6,"error":{"code":-32000,"message":"not enough work was done"}})");
         check(err.has_value() && err->kind == MessageKind::Error && err->error_code == -32000 &&

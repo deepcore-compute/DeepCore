@@ -249,7 +249,16 @@ std::optional<ParsedMessage> parse_message(const std::string& json_object)
     if (j.contains("result"))
     {
         const auto& result = j["result"];
-        if (result.is_boolean())
+        // zanod's own native stratum server acknowledges login/share-accept
+        // with a plain `result:true`. A real independent pool operator's
+        // implementation (found via cross-checking against Rigel, a known-
+        // working third-party miner, hitting the same live pool) instead
+        // sends `result:{"status":"OK"}` - a JSON object, not a boolean -
+        // for the exact same semantic acknowledgment. Both must be treated
+        // as MessageKind::Ok; only the array/work shape is distinguished
+        // from this by shape, so accepting objects here introduces no
+        // ambiguity.
+        if (result.is_boolean() || result.is_object())
         {
             msg.kind = MessageKind::Ok;
             return msg;

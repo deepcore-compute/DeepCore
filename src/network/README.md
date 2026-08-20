@@ -123,7 +123,45 @@ the same as a verified one. Fixed to plain `hex_decode`, matching
 `network_selftest`'s mock-server fixture to match. Re-verified both
 against a real local `zanod` (still Accepted, real blocks added - the fix
 doesn't regress the case that happened to work before by coincidence of
-low test difficulty) and is pending re-verification against LuckyPool.
+low test difficulty). A follow-up live LuckyPool run post-fix showed the
+false-positive/false-rejection pattern gone (0 rejected, 0 spurious
+instant "founds"), fully consistent with the real per-share difficulty at
+that port (~500,000,000, confirmed independently - see below) - 0 shares
+found in a short test window is expected math there, not a remaining bug.
+
+## Second real bug, found via cross-checking against a known-working miner
+
+To get an independent read on whether LuckyPool itself was behaving
+normally, ran Rigel (a real, known-working third-party GPU miner) against
+the same pool and wallet address with `--log-network`. Result: **5
+accepted, 0 rejected**, real hashrate ~38 MH/s on the same GPU (a Quadro
+GV100) - confirming the pool and target-difficulty math above, and giving
+an honest real-world throughput comparison (this project's current GPU
+backend, at ~13 KH/s, is about 3000x below a competitively-optimized
+kernel on identical hardware - expected, since only the "light"/no-
+persistent-cache correctness milestone exists so far, see
+`src/cuda/README.md`).
+
+The real value of this cross-check: Rigel's captured accept response for
+a genuine share was `{"jsonrpc":"2.0","id":19,"error":null,"result":
+{"status":"OK"}}` - `result` is a JSON **object**, not the plain boolean
+`true` every prior validation in this project (all against zanod's own
+native stratum server) had ever seen. `parse_message()`'s Ok-detection
+only checked `result.is_boolean()`; an object fell through to "shape not
+recognized" and was silently dropped. This means even after the
+`target_boundary` fix above, this project's own client would never have
+recognized a genuine LuckyPool accept - the pool would have accepted the
+share server-side, but our client-side accounting would have silently
+lost it. Fixed by accepting `result.is_boolean() || result.is_object()`
+as `MessageKind::Ok`, since the array/work shape is still unambiguous
+either way. `zanod`'s own boolean shape is unaffected/still handled.
+
+This is the second real bug this project has found only by testing
+against real, independent, third-party infrastructure (a live pool, and
+now a known-working competing miner) rather than only self-consistent
+tests or a single reference implementation (`zanod`'s own server) - a
+concrete argument for continuing this practice rather than declaring
+victory on local/self-test validation alone.
 
 ## Design notes worth knowing
 
