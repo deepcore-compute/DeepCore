@@ -96,12 +96,30 @@ int main()
             check(found->nonce == known_nonce, "B: found nonce is still the known winning nonce");
     }
 
-    // ---- C: a batch that excludes the winning nonce finds nothing ----
+    // ---- C: search actually honors [start_nonce, start_nonce+count) ----
+    // Uses an always-satisfied (all-0xFF) target rather than "a batch that
+    // excludes a specific known nonce should find nothing", which was
+    // this test's original (buggy) approach: target_boundary equal to one
+    // nonce's exact hash is NOT a "hard to meet" target in general - its
+    // magnitude as a fraction of the full 256-bit space is whatever that
+    // one hash happens to be (here, roughly 1-in-5, since its leading
+    // byte is 0x32), so a 65536-nonce batch had a near-certain chance of
+    // a coincidental extra match with no bug involved. An all-0xFF target
+    // matches literally every hash, so which nonce comes back is fully
+    // deterministic and actually tests window correctness.
     {
+        ProgPowZJob easy_job = job;
+        std::memset(easy_job.target_boundary.bytes, 0xFF, sizeof(easy_job.target_boundary.bytes));
         std::atomic<bool> cancelled{false};
-        auto found = backend.search(job, *ctx, /*start_nonce=*/known_nonce + 1,
-            backend.preferred_batch_size(), cancelled);
-        check(!found.has_value(), "C: a batch range excluding the winning nonce finds nothing");
+
+        auto found_at_0 = backend.search(easy_job, *ctx, /*start_nonce=*/0, /*count=*/1, cancelled);
+        check(found_at_0.has_value() && found_at_0->nonce == 0,
+            "C1: an always-satisfied target at start_nonce=0 finds nonce 0");
+
+        auto found_at_5 = backend.search(easy_job, *ctx, /*start_nonce=*/5, /*count=*/1, cancelled);
+        check(found_at_5.has_value() && found_at_5->nonce == 5,
+            "C2: an always-satisfied target at start_nonce=5 finds nonce 5 (not nonce 0) - "
+            "confirms the search window is actually respected");
     }
 
     // ---- D: an impossible target (zero) is never met ----
