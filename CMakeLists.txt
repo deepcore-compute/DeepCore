@@ -341,6 +341,8 @@ target_link_options(deepcore-miner PRIVATE
 option(DEEPCORE_BUILD_NETWORK_PROTOCOL "Build the Zano stratum wire-protocol library and its self-test (fetches nlohmann::json)" ON)
 
 if(DEEPCORE_BUILD_NETWORK_PROTOCOL)
+    find_package(Threads REQUIRED)
+
     include(FetchContent)
     FetchContent_Declare(
         nlohmann_json
@@ -494,9 +496,11 @@ endif()
 if(DEEPCORE_BUILD_NETWORK_PROTOCOL AND DEEPCORE_BUILD_REFERENCE_TOOLS)
     add_library(deepcore-progpowz-work STATIC
         src/mining/progpowz_work.cpp
+        src/mining/mining_loop.cpp
     )
     target_include_directories(deepcore-progpowz-work PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(deepcore-progpowz-work PUBLIC zano-stratum-protocol)
+    target_link_libraries(deepcore-progpowz-work PUBLIC zano-stratum-protocol ethash-progpow-ref)
+    target_link_libraries(deepcore-progpowz-work PRIVATE Threads::Threads)
     target_compile_options(deepcore-progpowz-work PRIVATE
         $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-Wall -Wextra -Wpedantic>
         $<$<CXX_COMPILER_ID:MSVC>:/W4>
@@ -506,6 +510,15 @@ if(DEEPCORE_BUILD_NETWORK_PROTOCOL AND DEEPCORE_BUILD_REFERENCE_TOOLS)
         tools/mining_selftest/mining_selftest.cpp
     )
     target_link_libraries(deepcore-mining-selftest PRIVATE deepcore-progpowz-work ethash-progpow-ref)
+
+    # MiningLoop's architecture (job handling, cancellation, submission)
+    # validated with a fake in-memory pool client - no real network needed.
+    # See src/network/README.md for the separate real-daemon validation of
+    # the pieces this loop wires together.
+    add_executable(deepcore-mining-loop-selftest
+        tools/mining_loop_selftest/mining_loop_selftest.cpp
+    )
+    target_link_libraries(deepcore-mining-loop-selftest PRIVATE deepcore-progpowz-work ethash-progpow-ref Threads::Threads)
 endif()
 
 # -----------------------------------------------------------------------------
