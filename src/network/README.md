@@ -84,6 +84,47 @@ protocol exchange - not a mock, not an assumption from reading source.
   fast-moving chain). Testing against the actual public testnet (or a
   node that's synced to it) is still a real, separate gap.
 
+## Real bug found via a real public pool (2026-08-20)
+
+Every real-daemon validation up to this point used a fresh single-node
+`zanod` testnet chain - always at epoch 0. Running `deepcore-miner --gpu`
+against a real, independent, live Zano **mainnet** pool (LuckyPool, not
+zanod's own stratum server) for the first time surfaced a real bug:
+**every submitted share came back `Incorrect share`, 0 accepted.**
+
+Root cause (confirmed via raw wire capture, `DEEPCORE_DEBUG_WIRE=1`, not
+guessed): `target_boundary` was decoded with `hex_decode_reversed`, based
+on a misreading of `get_work_json()` in zanod's `stratum_server.cpp`.
+This is provably wrong: `hash_meets_target()` compares `final_hash` and
+`target_boundary` with a plain big-endian byte-array `memcmp` (byte[0]
+most significant) and nothing reads `target_boundary` back through a
+native-integer load - unlike `height`, which also goes through
+`hex_decode_reversed` but is then read back via `bytes8_to_u64_native()`
+as a native little-endian integer, and reversing bytes then reading them
+little-endian is mathematically *identical* to reading the original wire
+bytes as big-endian directly. That cancellation is why `height` was
+always correct despite the same "reversed" label; `target_boundary` had
+no compensating second reversal, so it silently turned a genuinely tiny,
+hard real-network target into a numerically enormous, almost-always-
+satisfied one. The tell in the captured data: both "found" shares had
+nonces landing exactly on a search-batch boundary (0 and 65536) - the
+signature of "the very first nonce checked always looks like a match."
+
+**Why no self-test caught this:** every other test's target value was
+byte-symmetric (`0xFF`-filled, `0x00`-filled, `0x33`-filled) - invariant
+under byte reversal, so those tests would pass identically whether the
+decode was correct or not. The one test with an asymmetric target
+(`protocol_selftest`'s hand-written literal, target bytes `0x00..0x1f`)
+had its own expected wire string hand-encoded with the *same* wrong
+reversal, so it validated the code against its own mistaken assumption
+rather than real wire data - a reminder that a self-consistent test isn't
+the same as a verified one. Fixed to plain `hex_decode`, matching
+`pow_hash`/`seed_hash`; updated `protocol_selftest` and
+`network_selftest`'s mock-server fixture to match. Re-verified both
+against a real local `zanod` (still Accepted, real blocks added - the fix
+doesn't regress the case that happened to work before by coincidence of
+low test difficulty) and is pending re-verification against LuckyPool.
+
 ## Design notes worth knowing
 
 - Zano has no separate job-id field on the wire; `ZanoStratumClient` uses

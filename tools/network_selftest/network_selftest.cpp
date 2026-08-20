@@ -130,7 +130,7 @@ struct MockServer {
         std::array<std::uint8_t, 32> seed{}, target{};
         for (int i = 0; i < 32; ++i) { seed[static_cast<size_t>(i)] = 0x22; target[static_cast<size_t>(i)] = static_cast<std::uint8_t>(i); }
         std::string work_hex_seed = hex_encode(seed.data(), seed.size());
-        std::string work_hex_target = hex_encode_reversed(target.data(), target.size());
+        std::string work_hex_target = hex_encode(target.data(), target.size());
         std::string work_result_array = "[\"" + work_hex_pow + "\",\"" + work_hex_seed + "\",\"" +
             work_hex_target + "\",\"0x0000000000000001\"]";
 

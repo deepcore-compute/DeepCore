@@ -126,13 +126,18 @@ int main()
     //         code against itself). ----
     {
         // pow_hash = 32 bytes of 0x11, seed_hash = 32 bytes of 0x22,
-        // target_boundary bytes 0x00..0x1f (reversed on the wire),
-        // height = 12345 (reversed on the wire).
+        // target_boundary bytes 0x00..0x1f (straight on the wire, same as
+        // pow_hash/seed_hash - see zano_stratum_protocol.cpp's parse_message
+        // comment for why target_boundary is NOT reversed, unlike a
+        // previous, incorrect version of this test/the parser it was
+        // validating; confirmed against real captured traffic from a live
+        // Zano mainnet pool), height = 12345 (reversed on the wire, though
+        // mathematically identical to straight here - see that same
+        // comment).
         std::string pow_hash_hex = "0x" + std::string(64, '1');
         std::string seed_hash_hex = "0x" + std::string(64, '2');
-        // target_boundary bytes are 0x00,0x01,...,0x1f; reversed-encoded
-        // means the wire string lists them from byte[31] down to byte[0].
-        std::string target_hex = "0x1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100";
+        // target_boundary bytes are 0x00,0x01,...,0x1f, straight-encoded.
+        std::string target_hex = "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
         // height = 12345 = 0x3039, as 8 bytes reversed-encoded ->
         // "0x0000000000003039".
         std::string height_hex = "0x0000000000003039";
@@ -154,7 +159,7 @@ int main()
             }
             check(pow_ok, "parsed pow_hash bytes correct (straight decode)");
             check(seed_ok, "parsed seed_hash bytes correct (straight decode)");
-            check(target_ok, "parsed target_boundary bytes correct (reversed decode undoes wire reversal)");
+            check(target_ok, "parsed target_boundary bytes correct (straight decode)");
             check(parsed->work.height == 12345, "parsed height correct (reversed decode)");
         }
     }

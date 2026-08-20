@@ -256,13 +256,34 @@ std::optional<ParsedMessage> parse_message(const std::string& json_object)
         }
         if (result.is_array() && result.size() == 4)
         {
-            // [pow_hash(straight), seed_hash(straight),
-            //  target_boundary(reversed), height(reversed)] - see
-            // get_work_json() in stratum_server.cpp.
+            // [pow_hash(straight), seed_hash(straight), target_boundary(straight),
+            //  height(reversed-on-the-wire, but see bytes8_to_u64_native's
+            //  comment: un-reversing then reading as a native little-endian
+            //  u64 is mathematically identical to reading the original wire
+            //  bytes directly as big-endian, so this is not actually a
+            //  different convention from the other three fields).
+            //
+            // target_boundary was previously (incorrectly) decoded with
+            // hex_decode_reversed based on a misreading of
+            // get_work_json() in stratum_server.cpp. Unlike height, nothing
+            // reads target_boundary back through a native-integer load - it
+            // stays a 32-byte array compared via hash_meets_target's
+            // straight big-endian memcmp (byte[0] most significant, see
+            // progpowz_work.hpp). Reversing it before that comparison has
+            // no compensating second reversal, so it silently turned a
+            // genuinely tiny/hard real-network target into a numerically
+            // enormous (nearly always-satisfied) one - confirmed against
+            // real captured traffic from a live Zano mainnet pool
+            // (LuckyPool), where every submitted share came back "Incorrect
+            // share" and the two nonces found both landed suspiciously
+            // exactly on a search-batch boundary (a hallmark of "the first
+            // nonce checked always looks like it satisfies an
+            // almost-maximal target"). Fixed to plain hex_decode, matching
+            // pow_hash/seed_hash.
             bool ok = true;
             ok = ok && result[0].is_string() && hex_decode(result[0].get<std::string>(), msg.work.pow_hash.data(), 32);
             ok = ok && result[1].is_string() && hex_decode(result[1].get<std::string>(), msg.work.seed_hash.data(), 32);
-            ok = ok && result[2].is_string() && hex_decode_reversed(result[2].get<std::string>(), msg.work.target_boundary.data(), 32);
+            ok = ok && result[2].is_string() && hex_decode(result[2].get<std::string>(), msg.work.target_boundary.data(), 32);
             if (ok && result[3].is_string())
             {
                 std::array<uint8_t, 8> height_bytes{};
