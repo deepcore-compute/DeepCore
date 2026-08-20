@@ -1,6 +1,8 @@
 #include "zano_stratum_client.hpp"
 #include "zano_stratum_protocol.hpp"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <system_error>
 
@@ -117,6 +119,25 @@ std::string bytes_to_hex_lower(const std::array<std::uint8_t, 32>& b)
     return zano_stratum::hex_encode(b.data(), b.size());
 }
 
+// Diagnostic-only: dumps every raw wire message sent/received to stderr
+// when the DEEPCORE_DEBUG_WIRE environment variable is set to anything.
+// Not part of the public interface - purely for inspecting real pool
+// traffic when something needs cross-checking against actual bytes rather
+// than assumptions (see src/network/README.md's real-daemon validation
+// notes for why this project treats "assumed correct" and "verified
+// against real bytes" as different things).
+bool wire_debug_enabled()
+{
+    static const bool enabled = std::getenv("DEEPCORE_DEBUG_WIRE") != nullptr;
+    return enabled;
+}
+
+void log_wire(const char* direction, const std::string& message)
+{
+    if (wire_debug_enabled())
+        std::fprintf(stderr, "[wire %s] %s\n", direction, message.c_str());
+}
+
 }  // namespace
 
 ZanoStratumClient::ZanoStratumClient() = default;
@@ -166,7 +187,9 @@ void ZanoStratumClient::worker_main(PoolConfig config, IStratumEventSink* sink)
     set_state(ConnectionState::Authorizing, sink);
     {
         std::lock_guard<std::mutex> lock(send_mutex_);
-        if (!send_all(sock, build_submit_login(1, config.user, config.password, config.worker_name)))
+        std::string login_msg = build_submit_login(1, config.user, config.password, config.worker_name);
+        log_wire("send", login_msg);
+        if (!send_all(sock, login_msg))
         {
             sink->on_error(StratumError{"failed to send login", true});
             close_raw_socket(sock);
@@ -178,7 +201,9 @@ void ZanoStratumClient::worker_main(PoolConfig config, IStratumEventSink* sink)
         // waiting for the next unsolicited work-change notification, so
         // the caller gets a job immediately instead of only on the next
         // block/difficulty change.
-        send_all(sock, build_get_work(2));
+        std::string get_work_msg = build_get_work(2);
+        log_wire("send", get_work_msg);
+        send_all(sock, get_work_msg);
     }
 
     bool logged_in = false;
@@ -199,6 +224,7 @@ void ZanoStratumClient::worker_main(PoolConfig config, IStratumEventSink* sink)
             std::string obj;
             while (framer.pop_object(obj))
             {
+                log_wire("recv", obj);
                 auto parsed = parse_message(obj);
                 if (!parsed)
                     continue;  // malformed/unrecognized - ignore rather than tear down the connection
@@ -338,7 +364,10 @@ std::uint64_t ZanoStratumClient::submit_share(const ShareSubmission& submission)
     std::string worker_name;  // worker name isn't part of ShareSubmission; sent once at login already
     {
         std::lock_guard<std::mutex> lock(send_mutex_);
-        send_all(sock, build_submit_work(static_cast<std::int64_t>(id), worker_name, nonce, header_hash, mix_hash));
+        std::string submit_msg =
+            build_submit_work(static_cast<std::int64_t>(id), worker_name, nonce, header_hash, mix_hash);
+        log_wire("send", submit_msg);
+        send_all(sock, submit_msg);
     }
     return id;
 }
