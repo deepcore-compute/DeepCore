@@ -492,6 +492,12 @@ endif()
 #   - Otherwise, it falls back to the Phase 2 placeholder (src/main.cpp) with
 #     no extra dependencies, so the project always configures and builds
 #     regardless of which optional layers are enabled.
+#   - When CUDA is additionally available (DEEPCORE_WITH_CUDA and a CUDA
+#     compiler actually found), GpuHashSearchBackend is compiled in and the
+#     CLI's --gpu flag becomes available; DEEPCORE_HAVE_GPU_BACKEND is
+#     defined so the CLI source knows to expose it. Without CUDA, the CLI
+#     still builds - it just doesn't offer --gpu, matching this project's
+#     policy of never exposing a flag for something a given build can't do.
 # -----------------------------------------------------------------------------
 if(DEEPCORE_BUILD_NETWORK_PROTOCOL AND DEEPCORE_BUILD_REFERENCE_TOOLS)
     add_executable(deepcore-miner
@@ -502,6 +508,11 @@ if(DEEPCORE_BUILD_NETWORK_PROTOCOL AND DEEPCORE_BUILD_REFERENCE_TOOLS)
         deepcore-progpowz-work
         Threads::Threads
     )
+
+    if(DEEPCORE_WITH_CUDA AND CMAKE_CUDA_COMPILER)
+        target_sources(deepcore-miner PRIVATE src/cuda/progpowz_gpu_backend.cu)
+        target_compile_definitions(deepcore-miner PRIVATE DEEPCORE_HAVE_GPU_BACKEND)
+    endif()
 else()
     add_executable(deepcore-miner
         src/main.cpp
@@ -532,10 +543,16 @@ endif()
 
 # -----------------------------------------------------------------------------
 # Compiler warnings (compiler-specific, via generator expressions)
+#
+# Scoped to $<COMPILE_LANGUAGE:CXX> because deepcore-miner may also contain
+# a CUDA source (src/cuda/progpowz_gpu_backend.cu, added above when CUDA is
+# available) - these are plain GCC/Clang/MSVC flags that nvcc's own
+# front end does not reliably accept unscoped, unlike the CUDA-specific
+# targets elsewhere in this file which never mix languages in one target.
 # -----------------------------------------------------------------------------
 target_compile_options(deepcore-miner PRIVATE
-    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-Wall -Wextra -Wpedantic>
-    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>>:-Wall -Wextra -Wpedantic>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/W4>
 )
 
 # -----------------------------------------------------------------------------
@@ -553,15 +570,15 @@ target_compile_options(deepcore-miner PRIVATE
 # consensus-critical hashing/proof code once that code exists, even when this
 # option is enabled for the rest of the miner.
 target_compile_options(deepcore-miner PRIVATE
-    $<$<AND:$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>>:-O3>
-    $<$<AND:$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>,$<BOOL:${DEEPCORE_ENABLE_NATIVE_OPT}>>:-ffast-math -march=native>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>>:-O3>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>,$<BOOL:${DEEPCORE_ENABLE_NATIVE_OPT}>>:-ffast-math -march=native>
 )
 
 # MSVC: standard Release optimizations (/O2 maximize speed, /Oi intrinsics,
 # /GL whole-program optimization) plus matching /LTCG at link time. No GCC
 # flags are ever passed here.
 target_compile_options(deepcore-miner PRIVATE
-    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/O2 /Oi /GL>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/O2 /Oi /GL>
 )
 target_link_options(deepcore-miner PRIVATE
     $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/LTCG>

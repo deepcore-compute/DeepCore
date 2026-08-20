@@ -1,15 +1,18 @@
 // deepcore-miner - CLI entry point.
 //
 // Assembles ZanoStratumClient + MiningLoop into an actual runnable program:
-// connects to a Zano-protocol pool/daemon, mines with the CPU reference
-// backend (see src/mining/README.md - a GPU-backed backend is the real next
-// step for competitive throughput; this CLI already accepts either backend
-// without changes once one exists), and prints periodic status.
+// connects to a Zano-protocol pool/daemon, mines (CPU reference backend by
+// default; --gpu selects GpuHashSearchBackend when this build was compiled
+// with CUDA - see src/cuda/README.md), and prints periodic status.
 //
 // Deliberately does NOT expose flags for features that don't exist yet
-// (device selection, API port, power/temp limits, auto-tune, keepalive,
-// stale-share submission, job timeout) - see README files under src/ for
-// what's tracked as a real, honest gap rather than silently unsupported.
+// (multi-GPU selection beyond a single --gpu-device index, API port,
+// power/temp limits, auto-tune, keepalive, stale-share submission, job
+// timeout) - see README files under src/ for what's tracked as a real,
+// honest gap rather than silently unsupported. --gpu itself only appears
+// in --help/is accepted when DEEPCORE_HAVE_GPU_BACKEND was defined at
+// build time (i.e. this build actually has CUDA) - never a flag for
+// something this particular binary can't do.
 
 #include <atomic>
 #include <chrono>
@@ -22,6 +25,10 @@
 
 #include "../mining/mining_loop.hpp"
 #include "../network/zano_stratum_client.hpp"
+
+#ifdef DEEPCORE_HAVE_GPU_BACKEND
+#include "../cuda/progpowz_gpu_backend.hpp"
+#endif
 
 using namespace deepcore;
 using namespace deepcore::network;
@@ -37,11 +44,16 @@ struct Args {
     std::string user;     // public payout address (pool login)
     std::string worker;   // worker name, optional
     std::string password{"x"};
-    unsigned threads{0};  // 0 => hardware_concurrency()
+    unsigned threads{0};  // 0 => hardware_concurrency(); ignored when --gpu is set (forced to 1)
+    bool threads_explicit{false};
     unsigned status_interval_seconds{10};
     bool dry_run{false};
     bool quiet{false};
     bool show_help{false};
+#ifdef DEEPCORE_HAVE_GPU_BACKEND
+    bool gpu{false};
+    int gpu_device{0};
+#endif
 };
 
 void print_usage(const char* argv0)
@@ -57,13 +69,27 @@ void print_usage(const char* argv0)
         "  --worker <name>         Worker name reported to the pool (default: none)\n"
         "  --password <value>      Stratum password (default: \"x\")\n"
         "  --threads <n>           CPU search worker threads (default: hardware_concurrency())\n"
+        "                          ignored if --gpu is set (one worker drives one GPU)\n"
         "  --status-interval <s>   Seconds between status lines, 0 to disable (default: 10)\n"
         "  --dry-run               Connect, wait for the first job, print result, then exit\n"
         "  --quiet                 Suppress per-event log lines (status lines still print)\n"
+#ifdef DEEPCORE_HAVE_GPU_BACKEND
+        "  --gpu                   Mine with the GPU backend instead of the CPU one\n"
+        "  --gpu-device <n>        CUDA device index to use with --gpu (default: 0)\n"
+#endif
         "  --help, -h              Show this help text\n"
         "\n"
+#ifdef DEEPCORE_HAVE_GPU_BACKEND
+        "Note: --gpu uses the light-cache kernel (correctness-validated, not yet\n"
+        "throughput-optimized - see src/cuda/README.md) and drives a single CUDA\n"
+        "device; multi-GPU selection is not implemented yet.\n"
+#else
         "Note: mining currently runs on the CPU reference backend, which is\n"
-        "correct but not competitive throughput - see src/mining/README.md.\n",
+        "correct but not competitive throughput - see src/mining/README.md. This\n"
+        "build was not compiled with CUDA, so --gpu is not available - see\n"
+        "src/cuda/README.md.\n"
+#endif
+        ,
         argv0);
 }
 
@@ -110,6 +136,7 @@ bool parse_args(int argc, char** argv, Args& out, std::string& error)
             const char* v = next("--threads");
             if (!v) return false;
             out.threads = static_cast<unsigned>(std::strtoul(v, nullptr, 10));
+            out.threads_explicit = true;
         }
         else if (arg == "--status-interval")
         {
@@ -119,6 +146,22 @@ bool parse_args(int argc, char** argv, Args& out, std::string& error)
         }
         else if (arg == "--dry-run") { out.dry_run = true; }
         else if (arg == "--quiet") { out.quiet = true; }
+#ifdef DEEPCORE_HAVE_GPU_BACKEND
+        else if (arg == "--gpu") { out.gpu = true; }
+        else if (arg == "--gpu-device")
+        {
+            const char* v = next("--gpu-device");
+            if (!v) return false;
+            out.gpu_device = std::atoi(v);
+        }
+#else
+        else if (arg == "--gpu" || arg == "--gpu-device")
+        {
+            error = arg + " requires a build compiled with CUDA (DEEPCORE_HAVE_GPU_BACKEND) - "
+                           "see src/cuda/README.md";
+            return false;
+        }
+#endif
         else { error = "unrecognized argument: " + arg; return false; }
     }
     return true;
@@ -237,6 +280,28 @@ int main(int argc, char** argv)
     if (thread_count == 0)
         thread_count = 1;
 
+    std::unique_ptr<mining::IHashSearchBackend> backend;
+    const char* backend_name = "cpu";
+#ifdef DEEPCORE_HAVE_GPU_BACKEND
+    if (args.gpu)
+    {
+        if (args.threads_explicit && args.threads != 1 && !args.quiet)
+        {
+            std::printf("note: --threads is ignored when --gpu is set (one worker drives one "
+                        "GPU); requested %u, using 1\n", args.threads);
+        }
+        thread_count = 1;
+        backend = std::make_unique<mining::GpuHashSearchBackend>(args.gpu_device);
+        backend_name = "gpu";
+    }
+    else
+    {
+        backend = std::make_unique<mining::CpuHashSearchBackend>();
+    }
+#else
+    backend = std::make_unique<mining::CpuHashSearchBackend>();
+#endif
+
     PoolConfig config;
     config.endpoints.push_back(PoolEndpoint{host, port, false});
     config.user = args.user;
@@ -247,7 +312,7 @@ int main(int argc, char** argv)
     CliSink sink;
     sink.quiet = args.quiet;
 
-    mining::MiningLoop loop(client, std::make_unique<mining::CpuHashSearchBackend>(), thread_count);
+    mining::MiningLoop loop(client, std::move(backend), thread_count);
     sink.loop = &loop;
 
     auto connect_err = client.connect(config, sink);
@@ -279,8 +344,8 @@ int main(int argc, char** argv)
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
 
-    std::printf("deepcore-miner: connecting to %s:%u as %s (threads=%u)\n", host.c_str(),
-        static_cast<unsigned>(port), args.user.c_str(), thread_count);
+    std::printf("deepcore-miner: connecting to %s:%u as %s (backend=%s, threads=%u)\n", host.c_str(),
+        static_cast<unsigned>(port), args.user.c_str(), backend_name, thread_count);
 
     loop.start();
 

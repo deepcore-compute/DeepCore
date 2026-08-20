@@ -9,9 +9,22 @@ clean shutdown on SIGTERM/SIGINT).**
 
 `deepcore_miner_main.cpp` is what actually makes this project a runnable
 miner: it assembles `network::zano_stratum::ZanoStratumClient` and
-`mining::MiningLoop` (with `mining::CpuHashSearchBackend` - the reference
-backend, not yet a production GPU backend, see `src/mining/README.md`)
-behind a small CLI, and is the `deepcore-miner` executable target.
+`mining::MiningLoop` behind a small CLI, and is the `deepcore-miner`
+executable target. Uses `mining::CpuHashSearchBackend` by default; when
+this build was compiled with CUDA, `--gpu` selects
+`mining::GpuHashSearchBackend` instead (see `src/cuda/README.md` -
+**written, not yet validated with this CLI on real hardware**, though the
+backend itself has been, standalone).
+
+**`--gpu` status: NOT yet validated end-to-end through this CLI.**
+`GpuHashSearchBackend` itself passed all 11 checks in
+`deepcore-gpu-backend-selftest` on a real Quadro GV100 (see
+`src/cuda/README.md`), but that only exercises the backend directly, not
+through `MiningLoop`+`ZanoStratumClient`+this CLI together, and not
+through a mixed CXX+CUDA `deepcore-miner` build (a first for this
+target - see "Build" below). Do not trust `--gpu` from this CLI until a
+real run against a real daemon is recorded here, the same way the CPU
+path already is.
 
 ## Build
 
@@ -24,6 +37,17 @@ CMake layers are enabled:
 - Either one `OFF`: falls back to the Phase 2 placeholder (`src/main.cpp`)
   with no extra dependencies, so the project always configures and builds
   regardless of which optional layers are enabled.
+- Additionally `DEEPCORE_WITH_CUDA` with a CUDA compiler actually found:
+  `src/cuda/progpowz_gpu_backend.cu` is added to the target and
+  `DEEPCORE_HAVE_GPU_BACKEND` is defined, which is what makes `--gpu`
+  appear at all (see `parse_args`/`print_usage` - both are `#ifdef`-gated
+  on that macro, so a CPU-only build never claims a flag it can't honor).
+  This is the first `deepcore-miner` build to mix a CXX source
+  (`deepcore_miner_main.cpp`) and a CUDA source in one target; the
+  target's warning/optimization `target_compile_options` calls were
+  scoped with `$<COMPILE_LANGUAGE:CXX>` so GCC/Clang/MSVC-specific flags
+  are never handed to `nvcc`. Not yet confirmed to actually configure and
+  link cleanly on real hardware - see "Status" above.
 
 ## Usage
 
@@ -38,9 +62,13 @@ Options:
   --worker <name>         Worker name reported to the pool (default: none)
   --password <value>      Stratum password (default: "x")
   --threads <n>           CPU search worker threads (default: hardware_concurrency())
+                          ignored if --gpu is set (one worker drives one GPU)
   --status-interval <s>   Seconds between status lines, 0 to disable (default: 10)
   --dry-run               Connect, wait for the first job, print result, then exit
   --quiet                 Suppress per-event log lines (status lines still print)
+  --gpu                   Mine with the GPU backend instead of the CPU one
+                          (only present in a build compiled with CUDA)
+  --gpu-device <n>        CUDA device index to use with --gpu (default: 0)
   --help, -h              Show this help text
 ```
 
@@ -48,10 +76,11 @@ Options:
 checks) without actually mining: it exits 0 once connected and a job has
 been received (or exits 1 after a 10s timeout).
 
-Flags for features that don't exist yet (device/GPU selection, API port,
-power/temperature limits, auto-tune, keepalive, stale-share submission,
-job timeout) are deliberately not exposed - see `src/network/README.md`
-and `src/mining/README.md` for what's a real, tracked gap versus silently
+Flags for features that don't exist yet (multi-GPU selection beyond a
+single `--gpu-device` index, API port, power/temperature limits,
+auto-tune, keepalive, stale-share submission, job timeout) are
+deliberately not exposed - see `src/network/README.md` and
+`src/mining/README.md` for what's a real, tracked gap versus silently
 unsupported.
 
 ## Real-daemon validation (2026-08-20)
@@ -89,11 +118,11 @@ end-user binary rather than an internal component.
 
 ## What's still missing
 
-- **Mining throughput.** `CpuHashSearchBackend` is correct but far too
-  slow for competitive hashrate - see `src/mining/README.md` and
-  `src/cuda/README.md`. Swapping in a GPU-backed `IHashSearchBackend`
-  needs no change to this CLI.
-- **No device/GPU selection, no API/monitoring port, no power/thermal
+- **`--gpu` not yet validated through this CLI** - see "Status" above.
+- **Mining throughput even with `--gpu`.** `GpuHashSearchBackend` still
+  uses the light-cache kernel and re-uploads its epoch caches on every
+  batch - correct, but not yet competitive; see `src/cuda/README.md`.
+- **No multi-GPU support, no API/monitoring port, no power/thermal
   limits, no auto-tune.** None of these exist anywhere in the project yet
   (`src/hardware/gpu_manager.hpp` is still just an interface).
 - Everything tracked as a gap in `src/network/README.md` (TLS, multi-
