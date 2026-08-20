@@ -78,7 +78,7 @@ architectures remain unverified on real hardware.
 
 ## `GpuHashSearchBackend` (GPU milestone 2: mining_loop integration)
 
-**Written, NOT yet validated on real hardware.**
+**Validated on real hardware (Quadro GV100): all 11 self-test checks pass.**
 
 `progpowz_gpu_backend.{hpp,cu}` wraps `run_progpowz_light_gpu` (above) in a
 `mining::IHashSearchBackend` (see `src/mining/mining_loop.hpp`) - the
@@ -87,10 +87,24 @@ CPU reference backend. `tools/gpu_backend_selftest/gpu_backend_selftest.cu`
 is the validation gate for this layer, same role `gpu_selftest.cu` played
 for milestone 1: it drives the backend through known-answer searches
 (a target constructed from a nonce's own reference-computed hash, so the
-expected winner is known ahead of time), checks cancellation and a
-not-found case, and cross-checks its result against `CpuHashSearchBackend`
-on the same job/range. Must be built with `nvcc` and run on real hardware
-before `GpuHashSearchBackend` is trusted - not done yet.
+expected winner is known ahead of time), a deterministic window-
+correctness check (an always-satisfied target at two different start
+nonces must return exactly that nonce, not the other), a not-found case,
+cancellation, cross-run determinism, and a direct cross-check against
+`CpuHashSearchBackend` on the same job/range.
+
+Built with `-DDEEPCORE_WITH_CUDA=ON` and run on a Quadro GV100 (Volta,
+`sm_70`). The first real run found 9/10 checks passing, with one failure
+traced to a flawed test (not a backend bug): it used a target equal to one
+specific nonce's exact hash as a stand-in for "hard to meet", but that
+hash's magnitude (leading byte `0x32`) made it satisfiable by roughly 1 in
+5 random nonces - over a 65536-nonce batch a coincidental extra match was
+near-certain. Verified against the real reference implementation, then
+replaced with a deterministic check that doesn't depend on any hash's
+magnitude (an all-`0xFF` target must return exactly the requested start
+nonce, proving the search window is honored rather than hoping for no
+coincidence). Re-run on the same hardware: all 11 checks pass, GPU results
+matching the CPU reference backend exactly.
 
 Scope of this milestone, deliberately: still the "light" (recompute-on-
 demand) kernel, and no persistent device memory - the epoch's caches are
@@ -143,11 +157,10 @@ rather than a new correctness gap.
    on real Volta hardware. Ampere (`sm_80`, target Tesla A100 hardware) and
    other `CMAKE_CUDA_ARCHITECTURES` this project targets remain unverified
    on real hardware.
-2. **In progress.** Validate `GpuHashSearchBackend` for real: build
-   `deepcore-gpu-backend-selftest` with `-DDEEPCORE_WITH_CUDA=ON` and run
-   it on real hardware; fix whatever it finds, same discipline as every
-   other layer in this project.
-3. Only after (2) passes: wire `GpuHashSearchBackend` into `deepcore-miner`
+2. **Done.** `GpuHashSearchBackend` built with `-DDEEPCORE_WITH_CUDA=ON`
+   and validated on a real Quadro GV100 - all 11 self-test checks pass,
+   see above.
+3. Wire `GpuHashSearchBackend` into `deepcore-miner`
    (a `--gpu` flag or similar) and validate a live GPU mining run against a
    real `zanod`, same discipline as the CPU-backend CLI validation in
    `src/cli/README.md`.
