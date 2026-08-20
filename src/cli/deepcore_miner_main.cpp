@@ -350,6 +350,7 @@ int main(int argc, char** argv)
     loop.start();
 
     auto last_status = std::chrono::steady_clock::now();
+    std::uint64_t last_hashes = 0;
     while (!g_stop_requested.load())
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -360,17 +361,30 @@ int main(int argc, char** argv)
         auto now = std::chrono::steady_clock::now();
         if (now - last_status >= std::chrono::seconds(args.status_interval_seconds))
         {
-            last_status = now;
             auto mc = loop.counters();
             auto sc = client.counters();
+
+            // Hashrate is a real measured rate (delta hashes / delta
+            // wall-clock time since the last status line), not an
+            // estimate - accurate whatever the actual interval turned out
+            // to be, including the first tick where it's simply
+            // hashes_computed / status_interval_seconds.
+            double elapsed_seconds = std::chrono::duration<double>(now - last_status).count();
+            double hashrate = elapsed_seconds > 0.0
+                ? static_cast<double>(mc.hashes_computed - last_hashes) / elapsed_seconds
+                : 0.0;
+
             std::printf(
-                "[status] state=%s hashes=%llu shares_found=%llu jobs=%llu accepted=%llu rejected=%llu "
-                "stale=%llu invalid=%llu\n",
-                state_name(client.state()), static_cast<unsigned long long>(mc.hashes_computed),
+                "[status] state=%s hashrate=%.1f H/s hashes=%llu shares_found=%llu jobs=%llu "
+                "accepted=%llu rejected=%llu stale=%llu invalid=%llu\n",
+                state_name(client.state()), hashrate, static_cast<unsigned long long>(mc.hashes_computed),
                 static_cast<unsigned long long>(mc.shares_found),
                 static_cast<unsigned long long>(mc.jobs_received),
                 static_cast<unsigned long long>(sc.accepted), static_cast<unsigned long long>(sc.rejected),
                 static_cast<unsigned long long>(sc.stale), static_cast<unsigned long long>(sc.invalid));
+
+            last_status = now;
+            last_hashes = mc.hashes_computed;
         }
     }
 
