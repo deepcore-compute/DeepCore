@@ -6,19 +6,21 @@
 // src/cuda/README.md's "GPU milestone 1" account - all 4 recorded test
 // vectors passed byte-for-byte on a real Quadro GV100).
 //
-// SCOPE: still light-cache mode (each GPU thread recomputes dataset items
-// on demand rather than reading a precomputed full DAG) - real, working
-// GPU compute, not a stub, but not yet competitive throughput (confirmed
-// against a real competing miner: ~13 KH/s here vs. ~38 MH/s for Rigel on
-// the same Quadro GV100 - see src/network/README.md's cross-check
-// account). A full-DAG kernel is the real throughput lever and a
-// separate, larger milestone - see src/cuda/README.md.
+// SCOPE: uses the full-DAG kernel (progpowz_full_kernel /
+// DeviceFullDataset in progpowz_kernel.cu) when there is enough free VRAM
+// to build the epoch's complete dataset once (checked for real via
+// cudaMemGetInfo, never assumed); falls back to light-cache mode
+// (recompute each dataset item on demand) otherwise, with a clearly
+// printed reason - this is a real capacity constraint on some hardware,
+// not something to silently degrade past. Confirmed against a real
+// competing miner (Rigel, ~38 MH/s on a Quadro GV100) that light mode
+// alone (~13 KH/s on the same GPU) is about 3000x below competitive - see
+// src/network/README.md's cross-check account and src/cuda/README.md for
+// the full-DAG kernel's own validation status.
 //
-// This class DOES keep the epoch's light_cache/l1_cache VRAM-resident
-// across search() calls (DeviceEpochCache in progpowz_kernel.cu) instead
-// of re-uploading them every batch, which the correctness-only
-// run_progpowz_light_gpu wrapper does - that wrapper is left unmodified
-// and remains what gpu_selftest.cu validates against.
+// Both the epoch's l1_cache (DeviceEpochCache) and, when in full-DAG
+// mode, the full dataset (DeviceFullDataset) are kept VRAM-resident
+// across search() calls rather than re-uploaded/rebuilt every batch.
 //
 // Coarser cancellation than CpuHashSearchBackend: a CUDA kernel launch
 // cannot be interrupted mid-flight, so `cancelled` is only checked once,
@@ -58,6 +60,14 @@ public:
         std::uint64_t start_nonce, std::uint64_t count, const std::atomic<bool>& cancelled) override;
 
     [[nodiscard]] std::uint64_t preferred_batch_size() const override;
+
+    // True iff the most recent search() call used the full-DAG kernel
+    // rather than falling back to light-cache mode. Exists mainly so
+    // gpu_backend_selftest can assert full-DAG mode was actually
+    // exercised, not just that *some* correct backend happened to answer
+    // (light mode is also correct - passing tests alone don't prove which
+    // path ran). Undefined (returns false) before the first search() call.
+    [[nodiscard]] bool last_search_used_full_dag() const;
 
 private:
     int device_index_;

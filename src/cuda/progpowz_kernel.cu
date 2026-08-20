@@ -23,6 +23,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace deepcore::progpowz {
@@ -205,6 +206,204 @@ public:
         progpowz_light_kernel<<<blocks, threads_per_block>>>(
             cache.device_light_cache(), light_cache_num_items, cache.device_l1_cache(),
             full_dataset_num_items, block_number, header_hash, start_nonce, count, d_out_);
+
+        DEEPCORE_CUDA_CHECK(cudaGetLastError());
+        DEEPCORE_CUDA_CHECK(cudaDeviceSynchronize());
+
+        std::vector<GpuHashResult> results(count);
+        DEEPCORE_CUDA_CHECK(cudaMemcpy(results.data(), d_out_, static_cast<size_t>(count) * sizeof(GpuHashResult),
+            cudaMemcpyDeviceToHost));
+        return results;
+    }
+
+private:
+    void ensure_out_capacity(uint32_t count)
+    {
+        if (count <= d_out_capacity_)
+            return;
+        if (d_out_)
+            cudaFree(d_out_);
+        DEEPCORE_CUDA_CHECK(cudaMalloc(&d_out_, static_cast<size_t>(count) * sizeof(GpuHashResult)));
+        d_out_capacity_ = count;
+    }
+
+    GpuHashResult* d_out_ = nullptr;
+    uint32_t d_out_capacity_ = 0;
+};
+
+// ----------------------------------------------------------------------
+// GPU throughput milestone 2: full-DAG kernel.
+//
+// Light-cache mode (above) recomputes each dataset item from scratch via
+// calculate_dataset_item_2048 on every lookup during mixing (256 parent
+// rounds x 4 sub-items, once per one of the 64 mix rounds per hash) - this
+// is the dominant real cost behind this project's confirmed ~3000x
+// throughput gap versus a competitive miner on the same hardware (see
+// src/cuda/README.md, src/network/README.md's Rigel cross-check). Full-DAG
+// mode instead precomputes every dataset item ONCE per epoch into a large
+// VRAM-resident array, so each mix-round lookup becomes an O(1) read
+// instead of a full recompute.
+//
+// Correctness rests entirely on progpowz_hash_light's `full_dataset`
+// parameter (see progpowz_portable.hpp): when provided, it reads
+// full_dataset[item_index] instead of calling calculate_dataset_item_2048
+// - and the array is defined to hold exactly what that function would
+// have returned for each index, so populating it correctly is the whole
+// correctness question. That mechanism itself was validated on CPU with a
+// small synthetic dataset (tools/cuda_selftest/cuda_selftest.cpp); this
+// kernel is what populates a REAL, full-scale array (which - at millions
+// of items and multiple GB - is only realistically buildable on a GPU,
+// not something this project's CPU-only development environment can
+// exercise). Real-scale end-to-end validation is the job of
+// gpu_backend_selftest, comparing full-DAG output against the
+// already-validated light-mode kernel for real nonces against a real
+// epoch's full dataset - see that file.
+// ----------------------------------------------------------------------
+
+// One thread computes ONE full dataset item (hash2048, i.e. 4 combined
+// hash512 sub-items) - the same simple "one thread, one unit of work"
+// mapping this project used for progpowz_light_kernel above, for the same
+// reason: it is the lowest-risk way to parallelize an already-correct
+// scalar function, deferring cooperative/warp-level optimization to a
+// later, separate milestone once this is proven correct.
+__global__ void progpowz_dag_generate_kernel(
+    const hash512* light_cache, int64_t light_cache_num_items, uint32_t num_items, hash2048* out)
+{
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_items)
+        return;
+    out[idx] = calculate_dataset_item_2048(light_cache, light_cache_num_items, idx);
+}
+
+// Full-DAG counterpart to progpowz_light_kernel: identical mapping (one
+// thread, one nonce), but passes a precomputed dataset array through to
+// progpowz_hash_light instead of light_cache/light_cache_num_items (which
+// are unused - and therefore safe to leave null/zero - whenever
+// full_dataset is non-null; see that function's header comment).
+__global__ void progpowz_full_kernel(
+    const uint32_t* l1_cache_words, uint32_t full_dataset_num_items, const hash2048* full_dataset,
+    int block_number, hash256 header_hash, uint64_t start_nonce, uint32_t count, GpuHashResult* out)
+{
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count)
+        return;
+
+    uint64_t nonce = start_nonce + idx;
+    progpowz_result r = progpowz_hash_light(
+        /*light_cache=*/nullptr, /*light_cache_num_items=*/0, l1_cache_words, full_dataset_num_items,
+        block_number, header_hash, nonce, full_dataset);
+
+    out[idx].final_hash = r.final_hash;
+    out[idx].mix_hash = r.mix_hash;
+    out[idx].nonce = nonce;
+}
+
+// Builds and keeps VRAM-resident the full dataset for one epoch, rebuilding
+// only when the epoch's host light_cache pointer changes (same identity-
+// check pattern as DeviceEpochCache above, for the same reason: MiningLoop
+// reuses the same epoch_context, and therefore the same light_cache
+// pointer, across repeated jobs in the same epoch).
+//
+// Queries actual free VRAM before allocating (cudaMemGetInfo) and fails
+// clearly via `error_out` rather than attempting an allocation that would
+// exceed it - this project's stated policy is to never assume GPU
+// capacity. Callers must check the return value; a false return leaves
+// the dataset unbuilt/unusable (device_dataset() returns nullptr).
+class DeviceFullDataset {
+public:
+    DeviceFullDataset() = default;
+    ~DeviceFullDataset() { release(); }
+    DeviceFullDataset(const DeviceFullDataset&) = delete;
+    DeviceFullDataset& operator=(const DeviceFullDataset&) = delete;
+
+    [[nodiscard]] bool ensure_built(const hash512* host_light_cache, int64_t light_cache_num_items,
+        uint32_t full_dataset_num_items, std::string& error_out)
+    {
+        if (uploaded_identity_ == host_light_cache)
+            return true;
+
+        release();
+
+        const uint32_t num_items = full_dataset_num_items / 2;
+        const size_t dataset_bytes = static_cast<size_t>(num_items) * sizeof(hash2048);
+        const size_t light_cache_bytes = static_cast<size_t>(light_cache_num_items) * sizeof(hash512);
+
+        size_t free_bytes = 0, total_bytes = 0;
+        if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess)
+        {
+            error_out = "cudaMemGetInfo failed - cannot verify free VRAM before building the full DAG";
+            return false;
+        }
+
+        // Headroom for the light_cache upload (freed right after
+        // generation, but resident during it), output buffers, and driver/
+        // other-process overhead - deliberately conservative rather than
+        // trying to consume every last free byte.
+        constexpr size_t kHeadroomBytes = 512ull * 1024 * 1024;
+        const size_t bytes_needed = dataset_bytes + light_cache_bytes + kHeadroomBytes;
+        if (bytes_needed > free_bytes)
+        {
+            error_out = "insufficient free VRAM for the full DAG: need ~" +
+                std::to_string(bytes_needed / (1024 * 1024)) + " MiB, have " +
+                std::to_string(free_bytes / (1024 * 1024)) + " MiB free";
+            return false;
+        }
+
+        hash512* d_light_cache = nullptr;
+        DEEPCORE_CUDA_CHECK(cudaMalloc(&d_light_cache, light_cache_bytes));
+        DEEPCORE_CUDA_CHECK(
+            cudaMemcpy(d_light_cache, host_light_cache, light_cache_bytes, cudaMemcpyHostToDevice));
+
+        DEEPCORE_CUDA_CHECK(cudaMalloc(&d_dataset_, dataset_bytes));
+
+        const uint32_t threads_per_block = 256;
+        const uint32_t blocks = (num_items + threads_per_block - 1) / threads_per_block;
+        progpowz_dag_generate_kernel<<<blocks, threads_per_block>>>(
+            d_light_cache, light_cache_num_items, num_items, d_dataset_);
+
+        DEEPCORE_CUDA_CHECK(cudaGetLastError());
+        DEEPCORE_CUDA_CHECK(cudaDeviceSynchronize());
+
+        cudaFree(d_light_cache);  // only needed during generation, not for mining lookups afterward
+
+        uploaded_identity_ = host_light_cache;
+        return true;
+    }
+
+    [[nodiscard]] const hash2048* device_dataset() const { return d_dataset_; }
+
+private:
+    void release()
+    {
+        if (d_dataset_) { cudaFree(d_dataset_); d_dataset_ = nullptr; }
+        uploaded_identity_ = nullptr;
+    }
+
+    const hash512* uploaded_identity_ = nullptr;
+    hash2048* d_dataset_ = nullptr;
+};
+
+// Launches progpowz_full_kernel against an already-built DeviceFullDataset,
+// reusing a persistent (grow-only) output buffer - same pattern as
+// PersistentGpuSearcher above, for light mode.
+class PersistentFullDagSearcher {
+public:
+    PersistentFullDagSearcher() = default;
+    ~PersistentFullDagSearcher() { if (d_out_) cudaFree(d_out_); }
+    PersistentFullDagSearcher(const PersistentFullDagSearcher&) = delete;
+    PersistentFullDagSearcher& operator=(const PersistentFullDagSearcher&) = delete;
+
+    std::vector<GpuHashResult> search(DeviceFullDataset& dataset, const uint32_t* device_l1_cache_words,
+        uint32_t full_dataset_num_items, int block_number, const hash256& header_hash, uint64_t start_nonce,
+        uint32_t count)
+    {
+        ensure_out_capacity(count);
+
+        const uint32_t threads_per_block = 256;
+        const uint32_t blocks = (count + threads_per_block - 1) / threads_per_block;
+
+        progpowz_full_kernel<<<blocks, threads_per_block>>>(device_l1_cache_words, full_dataset_num_items,
+            dataset.device_dataset(), block_number, header_hash, start_nonce, count, d_out_);
 
         DEEPCORE_CUDA_CHECK(cudaGetLastError());
         DEEPCORE_CUDA_CHECK(cudaDeviceSynchronize());

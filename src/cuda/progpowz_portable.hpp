@@ -508,10 +508,24 @@ struct progpowz_result { hash256 final_hash; hash256 mix_hash; };
 // `full_dataset_num_items`: ethash_calculate_full_dataset_num_items(epoch) -
 // a distinct value from light_cache_num_items, used only for the main
 // per-round item_index modulus.
+// `full_dataset`: optional (default nullptr). When null (every existing
+// caller, unaffected), each round's dataset item is recomputed on demand
+// via calculate_dataset_item_2048 - "light" mode, correct but expensive
+// (256 parent rounds x 4 sub-items, once per mix round, i.e. per hash).
+// When non-null, it must point to a fully-populated array of
+// full_dataset_num_items/2 hash2048 entries (see the full-DAG generation
+// kernel in progpowz_kernel.cu) and each round instead does a single O(1)
+// read from it - same algorithm, same result, just a different (and, once
+// the dataset is precomputed, far cheaper) source for the same values.
+// The function's own logic makes this substitution trivially safe: the
+// array is defined to hold exactly what calculate_dataset_item_2048(i)
+// would have returned for that i, so reading it is definitionally
+// equivalent to computing it inline.
 PPZ_HD inline progpowz_result progpowz_hash_light(
     const hash512* light_cache, int64_t light_cache_num_items,
     const uint32_t* l1_cache_words, uint32_t full_dataset_num_items,
-    int block_number, const hash256& header_hash, uint64_t nonce)
+    int block_number, const hash256& header_hash, uint64_t nonce,
+    const hash2048* full_dataset = nullptr)
 {
     const uint64_t seed = keccak_progpow_64(header_hash, nonce);
 
@@ -564,7 +578,8 @@ PPZ_HD inline progpowz_result progpowz_hash_light(
 
         const uint32_t num_items = full_dataset_num_items / 2;
         const uint32_t item_index = mix[r % num_lanes][0] % num_items;
-        hash2048 item = calculate_dataset_item_2048(light_cache, light_cache_num_items, item_index);
+        hash2048 item = full_dataset ? full_dataset[item_index]
+                                      : calculate_dataset_item_2048(light_cache, light_cache_num_items, item_index);
 
         for (int i = 0; i < max_operations; ++i)
         {

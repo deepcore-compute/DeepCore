@@ -158,24 +158,48 @@ overhead); the dominant cost is that light-cache mode recomputes each
 dataset item from scratch (many rounds of Keccak-based mixing) on every
 lookup, which is what the full-DAG kernel below actually replaces.
 
+## Full-DAG kernel (GPU throughput milestone 2)
+
+**Written, NOT yet validated on real hardware.**
+
+`progpowz_hash_light` (in `progpowz_portable.hpp`) gained an optional
+`full_dataset` parameter: when null (every existing caller, unaffected),
+behavior is completely unchanged (recompute each dataset item on demand);
+when provided, it reads `full_dataset[item_index]` instead - the same
+value `calculate_dataset_item_2048` would have computed, just precomputed
+once instead of recomputed on every one of the 64 mix-round lookups per
+hash. This one substitution is where the real throughput gain comes from.
+
+This mechanism was validated on CPU first, with a small synthetic dataset
+built against the real epoch-0 light_cache (`tools/cuda_selftest/
+cuda_selftest.cpp`): light mode and full-DAG-array mode produce
+byte-identical output for several nonces. A real dataset (millions of
+items, multiple GB) is only realistically buildable on a GPU, so
+real-scale validation is GPU-only, same situation as the original kernel.
+
+`progpowz_kernel.cu` adds: `progpowz_dag_generate_kernel` (one thread per
+dataset item, calling the already-proven `calculate_dataset_item_2048`)
+and `progpowz_full_kernel` (identical mapping to `progpowz_light_kernel`,
+but sourcing dataset items from a precomputed array); `DeviceFullDataset`
+builds and keeps the full dataset VRAM-resident per epoch (same host-
+pointer-identity caching pattern as `DeviceEpochCache`), checking real
+free VRAM via `cudaMemGetInfo` first and failing clearly rather than
+assuming capacity; `PersistentFullDagSearcher` launches it with a reused
+output buffer. `GpuHashSearchBackend` now prefers full-DAG mode whenever
+the epoch's dataset fits, falling back to light-cache mode (with a
+clearly logged reason, once per epoch) when it doesn't -
+`last_search_used_full_dag()` lets `gpu_backend_selftest` assert which
+path actually ran, since light mode is also correct and would otherwise
+make every check pass silently either way.
+
 ## What does NOT exist yet
 
-- **No full-DAG (mining-speed) kernel.** This only implements the
-  "light"/cache-based path (recompute each dataset item on demand), which
-  is what the reference vectors were generated with and is fine for a
-  correctness check, but is far too slow per-hash for real mining
-  (confirmed: ~13 KH/s here vs. ~38 MH/s for a competitive kernel on the
-  same GV100). A real miner needs the full dataset resident in VRAM with
-  O(1) lookups - that is the actual throughput lever, a distinct, larger
-  milestone, not started here.
-- **No lane-cooperative (16 threads/warp via `__shfl_sync`) kernel.** That
-  is the real-world performance mapping for ProgPoW on GPU; the
-  single-thread-per-hash approach here is deliberately the simpler,
-  lower-risk first step.
-- **No CLI wiring.** `deepcore-miner` still always uses
-  `CpuHashSearchBackend` - see `src/cli/README.md`. Selecting
-  `GpuHashSearchBackend` from the CLI is a separate, later step, only
-  after this backend is validated on real hardware.
+- **Full-DAG kernel not yet validated on real hardware** - see above.
+- **No lane-cooperative (16 threads/warp via `__shfl_sync`) kernel**, for
+  either mode. That is the real-world performance mapping for ProgPoW on
+  GPU; the single-thread-per-hash approach here is deliberately the
+  simpler, lower-risk step, for both light and full-DAG modes.
+- **No launch-parameter autotuning, no CUDA Graphs / stream overlap.**
 - **No multi-GPU support, no integration with `gpu_manager.hpp`** (device
   enumeration/selection/telemetry) - `GpuHashSearchBackend` drives exactly
   one CUDA device index passed at construction.
@@ -203,9 +227,10 @@ lookup, which is what the full-DAG kernel below actually replaces.
    checks pass, see above.
 5. **In progress.** The actual throughput lever: the full-dataset
    (precomputed DAG in VRAM, O(1) lookups instead of recompute-on-demand)
-   path, sized dynamically from queried free VRAM (see
-   `gpu_manager.hpp`'s telemetry interface, never a hard-coded capacity
-   assumption). Only after that is measured working: lane-cooperative
+   path. Written, validated on CPU with a small synthetic dataset,
+   sized dynamically from queried free VRAM at real scale (never a
+   hard-coded capacity assumption) - not yet run on real hardware, see
+   above. Only after that's measured working: lane-cooperative
    warp-shuffle optimization, launch-parameter autotuning per
    architecture, CUDA Graphs / stream overlap, etc.
 

@@ -202,6 +202,20 @@ int main()
         }
     }
 
+    // ---- J: full-DAG mode was actually used, not silently falling back ----
+    // Every check above already ran through GpuHashSearchBackend, which
+    // prefers full-DAG mode whenever the epoch's dataset fits in free VRAM
+    // (checked for real via cudaMemGetInfo - never assumed). Since
+    // light-cache mode is ALSO correct, tests A/B/C/D/E/F/H/I passing does
+    // NOT by itself prove full-DAG mode ran - this check closes that gap
+    // directly, so a real, no-hardware-degradation full-DAG validation
+    // requires this to be true (a silent fallback would need investigating
+    // separately, not just accepted because everything else passed).
+    {
+        check(backend.last_search_used_full_dag(),
+            "J: the most recent search() used full-DAG mode, not a silent light-cache fallback");
+    }
+
     if (g_failures == 0)
     {
         std::printf("\nALL CHECKS PASSED: GpuHashSearchBackend is correctly wired to the GPU kernel "

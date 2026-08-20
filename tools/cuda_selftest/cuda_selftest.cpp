@@ -19,6 +19,7 @@
 // validating on real hardware.
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include <ethash/progpow.hpp>
 #include "ethash-internal.hpp"
@@ -116,6 +117,51 @@ void run_case(const ethash::epoch_context& ctx, int block_number,
     }
 }
 
+// Correctness check for progpowz_hash_light's new optional `full_dataset`
+// parameter (see that function's header comment in progpowz_portable.hpp)
+// - the mechanism the real full-DAG GPU kernel will use. Does NOT build a
+// real epoch's full dataset (millions of items, gigabytes - only
+// realistically feasible on a GPU, see progpowz_kernel.cu's DAG-generation
+// kernel and src/cuda/README.md); instead uses a small, artificial
+// full_dataset_num_items against the REAL epoch-0 light_cache (only
+// light_cache/light_cache_num_items matter for computing an individual
+// item - full_dataset_num_items just sets the item_index range, so a
+// small fake value here is a legitimate, fast, CPU-only way to test the
+// array-read branch's correctness without needing a real-scale dataset).
+//
+// Method: for each of several nonces, run progpowz_hash_light once with
+// full_dataset=nullptr (light/recompute mode, the path every existing
+// caller already uses and this project has already proven correct) and
+// once with full_dataset pointing at a small array pre-populated by
+// calling calculate_dataset_item_2048 directly for every index in range -
+// i.e. the array holds exactly what the recompute path would have
+// computed anyway. The two calls MUST produce byte-identical output; any
+// difference means the new array-read branch's indexing/threading is
+// wrong, independent of whether calculate_dataset_item_2048 itself is
+// correct (already proven separately, above).
+void run_full_dataset_mode_case(const ethash::epoch_context& ctx, int block_number,
+    const ethash::hash256& header_hash, uint64_t nonce,
+    const std::vector<deepcore::progpowz::hash2048>& small_full_dataset, uint32_t fake_full_dataset_num_items)
+{
+    auto our_header = to_portable(header_hash);
+    const auto* light_cache = reinterpret_cast<const deepcore::progpowz::hash512*>(ctx.light_cache);
+
+    auto light_mode = deepcore::progpowz::progpowz_hash_light(light_cache, ctx.light_cache_num_items,
+        ctx.l1_cache, fake_full_dataset_num_items, block_number, our_header, nonce, /*full_dataset=*/nullptr);
+
+    auto full_dag_mode = deepcore::progpowz::progpowz_hash_light(light_cache, ctx.light_cache_num_items,
+        ctx.l1_cache, fake_full_dataset_num_items, block_number, our_header, nonce, small_full_dataset.data());
+
+    bool final_ok = bytes_equal(light_mode.final_hash.bytes, full_dag_mode.final_hash.bytes, 32);
+    bool mix_ok = bytes_equal(light_mode.mix_hash.bytes, full_dag_mode.mix_hash.bytes, 32);
+
+    std::printf("full_dataset-mode check (nonce=0x%016llx): %s\n", static_cast<unsigned long long>(nonce),
+        (final_ok && mix_ok) ? "PASS (light mode and full_dataset-array mode agree exactly)"
+                              : "FAIL (final_hash/mix_hash mismatch)");
+    if (!final_ok || !mix_ok)
+        ++g_failures;
+}
+
 }  // namespace
 
 int main()
@@ -144,6 +190,31 @@ int main()
     run_case(*ctx, 0, zero_hash, 1);
     run_case(*ctx, 0, pattern_hash, 0x123456789abcdef0ULL);
     run_case(*ctx, 12345, pattern_hash, 0x123456789abcdef0ULL);
+
+    // full_dataset-mode (full-DAG kernel mechanism) correctness - see that
+    // function's header comment above. Small, artificial dataset size
+    // (128 -> 64 hash2048 items), built from the real epoch-0 light_cache.
+    {
+        std::printf("--- full_dataset-mode (full-DAG kernel mechanism) checks ---\n");
+        const uint32_t fake_full_dataset_num_items = 128;
+        const uint32_t num_small_items = fake_full_dataset_num_items / 2;
+
+        std::vector<deepcore::progpowz::hash2048> small_full_dataset(num_small_items);
+        const auto* light_cache = reinterpret_cast<const deepcore::progpowz::hash512*>(ctx->light_cache);
+        for (uint32_t i = 0; i < num_small_items; ++i)
+        {
+            small_full_dataset[i] =
+                deepcore::progpowz::calculate_dataset_item_2048(light_cache, ctx->light_cache_num_items, i);
+        }
+
+        run_full_dataset_mode_case(*ctx, 0, zero_hash, 0, small_full_dataset, fake_full_dataset_num_items);
+        run_full_dataset_mode_case(*ctx, 0, zero_hash, 1, small_full_dataset, fake_full_dataset_num_items);
+        run_full_dataset_mode_case(
+            *ctx, 0, pattern_hash, 0x123456789abcdef0ULL, small_full_dataset, fake_full_dataset_num_items);
+        run_full_dataset_mode_case(
+            *ctx, 12345, pattern_hash, 0x123456789abcdef0ULL, small_full_dataset, fake_full_dataset_num_items);
+        std::printf("\n");
+    }
 
     if (g_failures == 0)
     {
