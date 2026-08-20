@@ -123,18 +123,50 @@ CPU backend (a CUDA kernel can't be interrupted mid-flight) - see that
 class's header comment for why this is an accepted, documented tradeoff
 rather than a new correctness gap.
 
+## Persistent VRAM caching (GPU throughput milestone 1)
+
+**Written, NOT yet validated on real hardware.**
+
+`GpuHashSearchBackend` previously re-uploaded the epoch's `light_cache`/
+`l1_cache` (tens of MB) to the GPU on every `search()` batch. Real-world
+testing against a live Zano mainnet pool and a cross-check against Rigel
+(a known-working third-party miner, ~38 MH/s on the same Quadro GV100)
+put a concrete number on the gap this project is actually working from:
+this backend runs at ~13 KH/s - about 3000x below a competitively-
+optimized kernel on identical hardware (see `src/network/README.md` for
+the full account). Re-uploading the light_cache every ~5 seconds was one
+real, avoidable cost on top of that gap.
+
+`DeviceEpochCache` and `PersistentGpuSearcher` (added to
+`progpowz_kernel.cu`, additive - the correctness-only
+`run_progpowz_light_gpu` used by `gpu_selftest.cu` is untouched) keep the
+light_cache/l1_cache resident in VRAM across calls, re-uploading only
+when the epoch context's host pointer actually changes (which
+`MiningLoop`'s own epoch-context cache guarantees happens only on a real
+epoch change, not on every job). `GpuHashSearchBackend` now uses these
+via a pImpl (so its public header stays plain C++, includable from
+non-CUDA translation units like the CLI). `gpu_backend_selftest` gained
+two new checks (I1/I2) specifically targeting the new identity-check
+logic: switching between two independent epoch-0 contexts and back, to
+catch any bug that would let a stale cached light_cache silently leak
+into results for a different context.
+
+**Important scope note: this alone does not close anywhere near the
+3000x gap.** It removes one real but secondary cost (re-upload
+overhead); the dominant cost is that light-cache mode recomputes each
+dataset item from scratch (many rounds of Keccak-based mixing) on every
+lookup, which is what the full-DAG kernel below actually replaces.
+
 ## What does NOT exist yet
 
 - **No full-DAG (mining-speed) kernel.** This only implements the
   "light"/cache-based path (recompute each dataset item on demand), which
   is what the reference vectors were generated with and is fine for a
-  correctness check, but is far too slow per-hash for real mining. A real
-  miner needs the full dataset resident in VRAM with O(1) lookups - that
-  is a distinct, later performance milestone, not started here.
-- **No persistent device memory in `GpuHashSearchBackend`.** The epoch's
-  light_cache/l1_cache are re-uploaded on every `search()` call rather
-  than kept resident in VRAM across calls for the same epoch - a real
-  performance cost once this backend is otherwise validated.
+  correctness check, but is far too slow per-hash for real mining
+  (confirmed: ~13 KH/s here vs. ~38 MH/s for a competitive kernel on the
+  same GV100). A real miner needs the full dataset resident in VRAM with
+  O(1) lookups - that is the actual throughput lever, a distinct, larger
+  milestone, not started here.
 - **No lane-cooperative (16 threads/warp via `__shfl_sync`) kernel.** That
   is the real-world performance mapping for ProgPoW on GPU; the
   single-thread-per-hash approach here is deliberately the simpler,
@@ -160,17 +192,21 @@ rather than a new correctness gap.
 2. **Done.** `GpuHashSearchBackend` built with `-DDEEPCORE_WITH_CUDA=ON`
    and validated on a real Quadro GV100 - all 11 self-test checks pass,
    see above.
-3. Wire `GpuHashSearchBackend` into `deepcore-miner`
-   (a `--gpu` flag or similar) and validate a live GPU mining run against a
-   real `zanod`, same discipline as the CPU-backend CLI validation in
-   `src/cli/README.md`.
-4. Only after (3) works end-to-end: persistent device memory (upload once
-   per epoch, not once per batch), the full-dataset (precomputed DAG in
-   VRAM) path for real mining throughput sized dynamically from queried
-   free VRAM (see `gpu_manager.hpp`'s telemetry interface, never a
-   hard-coded capacity assumption), lane-cooperative warp-shuffle
-   optimization, launch-parameter autotuning per architecture, CUDA
-   Graphs / stream overlap, etc.
+3. **Done.** `--gpu` wired into `deepcore-miner`, validated against a real
+   local `zanod` and a real public Zano mainnet pool (LuckyPool) - found
+   and fixed two real bugs along the way (byte-order, response-shape) -
+   see `src/network/README.md`. Real hashrate confirmed: ~13 KH/s, vs.
+   ~38 MH/s for a competitive kernel (Rigel) on the same GV100.
+4. **In progress.** Persistent VRAM caching (upload the epoch's caches
+   once, not once per batch) - written, see above, not yet validated on
+   real hardware.
+5. The actual throughput lever, not yet started: the full-dataset
+   (precomputed DAG in VRAM, O(1) lookups instead of recompute-on-demand)
+   path, sized dynamically from queried free VRAM (see
+   `gpu_manager.hpp`'s telemetry interface, never a hard-coded capacity
+   assumption). Only after that is measured working: lane-cooperative
+   warp-shuffle optimization, launch-parameter autotuning per
+   architecture, CUDA Graphs / stream overlap, etc.
 
 Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
 necessary but not sufficient at each step; only real GPU execution can

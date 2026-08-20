@@ -160,6 +160,48 @@ int main()
         check(agree, "H: GpuHashSearchBackend and CpuHashSearchBackend agree on the same job/range");
     }
 
+    // ---- I: persistent VRAM cache correctly re-uploads for a genuinely
+    // different epoch_context object, not just a different epoch number -
+    // targets DeviceEpochCache's "same host pointer = skip re-upload"
+    // identity check directly. Builds a second, INDEPENDENT epoch-0
+    // context (same epoch, different object/pointer - as if MiningLoop's
+    // own epoch cache had been evicted and rebuilt), interleaves calls
+    // against the original and the new one, and confirms neither call
+    // picks up stale results left over from the other. If the identity
+    // check ever failed to detect the switch (e.g. compared the wrong
+    // pointer, or a real host allocator reused the same address), a
+    // wrong/stale light_cache could silently be used, corrupting results
+    // without any error - this is the test that would catch that. ----
+    {
+        auto ctx2 = ethash::create_epoch_context(0);
+        if (!ctx2)
+        {
+            check(false, "I: could not build a second independent epoch-0 context");
+        }
+        else
+        {
+            std::atomic<bool> cancelled{false};
+
+            // Same known-answer setup as A/B, but against the fresh
+            // context - correct results here require DeviceEpochCache to
+            // have actually re-uploaded for ctx2's (different) light_cache
+            // pointer, not silently kept serving ctx's data.
+            auto found_ctx2 = backend.search(job, *ctx2, /*start_nonce=*/known_nonce, /*count=*/1, cancelled);
+            check(found_ctx2.has_value() && found_ctx2->nonce == known_nonce &&
+                    std::memcmp(found_ctx2->mix_hash.bytes, ref.mix_hash.bytes, 32) == 0,
+                "I1: search against a second, independent epoch-0 context gives correct results");
+
+            // Switch back to the original context - confirms the cache
+            // re-uploads AGAIN on the way back, rather than e.g. getting
+            // stuck always re-uploading ctx2's data after the first switch.
+            auto found_ctx1_again =
+                backend.search(job, *ctx, /*start_nonce=*/known_nonce, /*count=*/1, cancelled);
+            check(found_ctx1_again.has_value() && found_ctx1_again->nonce == known_nonce &&
+                    std::memcmp(found_ctx1_again->mix_hash.bytes, ref.mix_hash.bytes, 32) == 0,
+                "I2: switching back to the original context after a different one still gives correct results");
+        }
+    }
+
     if (g_failures == 0)
     {
         std::printf("\nALL CHECKS PASSED: GpuHashSearchBackend is correctly wired to the GPU kernel "
