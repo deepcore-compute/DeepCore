@@ -109,16 +109,13 @@ protocol exchange - not a mock, not an assumption from reading source.
    added to its chain - see "Real-daemon validation" above.
 2. **Done.** `progpowz_work` mining glue - built, self-tested, and
    exercised live in the same real-daemon run.
-3. Build the actual production mining loop: persistent GPU-driven nonce
-   search (using the CUDA kernel, not the ad-hoc CPU search used for the
-   validation above) continuously fed by `ZanoStratumClient`'s jobs,
-   submitting through the same client. Test it against the real daemon
-   again once it exists.
-4. Only after (3) works end-to-end: reconnect/backoff, multi-endpoint
-   failover, TLS, keepalive, CLI wiring, and validation against the real
-   public testnet (not just a single-node genesis chain).
-
-Do not skip ahead to (4) before (3) is proven - a transport that only
-knows how to fail over between endpoints it has never successfully
-talked to a real daemon on is not meaningfully more "production-ready,"
-just more complex.
+3. **Done.** Production mining loop (`src/mining/mining_loop.{hpp,cpp}`) -
+   see `src/mining/README.md`.
+4. **Done.** CLI wiring (`src/cli/deepcore_miner_main.cpp`, target
+   `deepcore-miner`) - assembles `ZanoStratumClient` + `MiningLoop` into an
+   actual runnable program, validated with both `--dry-run` and a live
+   mining run against a real `zanod` (see `src/cli/README.md`).
+5. Remaining, not yet started: reconnect/backoff, multi-endpoint failover,
+   TLS, keepalive, and validation against the real public testnet (not
+   just a single-node genesis chain). A GPU-backed `IHashSearchBackend` is
+   also still outstanding - see `src/mining/README.md`.

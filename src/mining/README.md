@@ -75,12 +75,14 @@ accepted), not a correctness problem.
   too slow for real mining throughput - see `src/cuda/README.md`. A
   backend wrapping the CUDA kernel (and eventually a full-DAG kernel) is
   the real next step for anything resembling competitive hashrate.
-- **No CLI / process wiring.** Nothing yet assembles `ZanoStratumClient` +
-  `MiningLoop` + real config (pool URL, wallet address, device selection)
-  into an actual runnable `deepcore-miner` program - `src/main.cpp` is
-  still the Phase 2 placeholder.
 - **No local "already solved this job" tracking**, per the note above.
 - Everything else tracked as a gap in `src/network/README.md` (TLS,
   failover, reconnect/backoff, keepalive, Windows verification, real
   public-testnet validation) applies here too, since this loop sits on
   top of that transport.
+
+## CLI wiring
+
+`MiningLoop` is now assembled into an actual runnable program - see
+`src/cli/README.md` for `deepcore-miner`'s flags and its own real-daemon
+validation (which exercised this exact loop, not a test harness).

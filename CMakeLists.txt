@@ -265,69 +265,10 @@ if(DEEPCORE_WITH_CUDA AND DEEPCORE_CUDA_COMPILER_FOUND)
     endif()
 endif()
 
-# ----- Core target -----------------------------------------------------------
-add_executable(deepcore-miner
-    src/main.cpp
-)
-
-target_include_directories(deepcore-miner PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-
-target_compile_definitions(deepcore-miner PRIVATE
-    DEEPCORE_VERSION_STRING="${PROJECT_VERSION}"
-)
-
-# GPU vendor SDKs (CUDA Toolkit, NVML) are deliberately NOT find_package()'d
-# here. The GPU backend is designed around dynamic driver loading at runtime
-# (dlopen()/dlsym() on Linux, LoadLibrary()/GetProcAddress() on Windows
-# against libcuda.so / nvcuda.dll and libnvidia-ml.so / nvml.dll) so that the
-# miner builds and runs on machines without the CUDA Toolkit installed, and
-# so a HiveOS package does not need to bundle the Toolkit. When the dynamic
-# loader implementation is added under src/hardware/, link the platform's
-# dynamic-loading library here:
-if(UNIX AND NOT APPLE)
-    target_link_libraries(deepcore-miner PRIVATE ${CMAKE_DL_LIBS})
-endif()
-# On Windows, LoadLibrary/GetProcAddress live in kernel32, which is linked by
-# default - no extra target_link_libraries entry is needed there.
-
-# -----------------------------------------------------------------------------
-# Compiler warnings (compiler-specific, via generator expressions)
-# -----------------------------------------------------------------------------
-target_compile_options(deepcore-miner PRIVATE
-    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-Wall -Wextra -Wpedantic>
-    $<$<CXX_COMPILER_ID:MSVC>:/W4>
-)
-
-# -----------------------------------------------------------------------------
-# Release optimization flags
-#
-# GCC/Clang and MSVC accept different flag syntax, so each is scoped with a
-# CXX_COMPILER_ID generator expression rather than set globally - a global
-# CMAKE_CXX_FLAGS would otherwise pass GCC-style flags to MSVC and fail.
-# -----------------------------------------------------------------------------
-
-# GCC/Clang: -O3 always for Release. -ffast-math and -march=native are gated
-# behind DEEPCORE_ENABLE_NATIVE_OPT since they are unsafe for redistributable
-# binaries (see option() comment above). NOTE: -ffast-math relaxes IEEE-754
-# semantics; it must be re-scoped OFF for any translation unit implementing
-# consensus-critical hashing/proof code once that code exists, even when this
-# option is enabled for the rest of the miner.
-target_compile_options(deepcore-miner PRIVATE
-    $<$<AND:$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>>:-O3>
-    $<$<AND:$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>,$<BOOL:${DEEPCORE_ENABLE_NATIVE_OPT}>>:-ffast-math -march=native>
-)
-
-# MSVC: standard Release optimizations (/O2 maximize speed, /Oi intrinsics,
-# /GL whole-program optimization) plus matching /LTCG at link time. No GCC
-# flags are ever passed here.
-target_compile_options(deepcore-miner PRIVATE
-    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/O2 /Oi /GL>
-)
-target_link_options(deepcore-miner PRIVATE
-    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/LTCG>
-)
+# Note: the deepcore-miner executable target itself (plus its warning flags,
+# release optimization flags, and link options) is defined further down,
+# after the optional network/mining libraries it conditionally links against
+# - see the "Core target" section near the end of this file.
 
 # -----------------------------------------------------------------------------
 # Zano stratum wire protocol (pure encode/decode, no networking yet - see
@@ -522,12 +463,99 @@ if(DEEPCORE_BUILD_NETWORK_PROTOCOL AND DEEPCORE_BUILD_REFERENCE_TOOLS)
 endif()
 
 # -----------------------------------------------------------------------------
+# Core target - deepcore-miner
+#
+# Defined here (not near the top of this file) because its source selection
+# depends on whether the optional network/mining layers above were built:
+#   - When both DEEPCORE_BUILD_NETWORK_PROTOCOL and DEEPCORE_BUILD_REFERENCE_TOOLS
+#     are ON (the default), this is the real CLI (src/cli/deepcore_miner_main.cpp)
+#     wired to ZanoStratumClient + MiningLoop - an actually runnable miner.
+#   - Otherwise, it falls back to the Phase 2 placeholder (src/main.cpp) with
+#     no extra dependencies, so the project always configures and builds
+#     regardless of which optional layers are enabled.
+# -----------------------------------------------------------------------------
+if(DEEPCORE_BUILD_NETWORK_PROTOCOL AND DEEPCORE_BUILD_REFERENCE_TOOLS)
+    add_executable(deepcore-miner
+        src/cli/deepcore_miner_main.cpp
+    )
+    target_link_libraries(deepcore-miner PRIVATE
+        zano-stratum-client
+        deepcore-progpowz-work
+        Threads::Threads
+    )
+else()
+    add_executable(deepcore-miner
+        src/main.cpp
+    )
+endif()
+
+target_include_directories(deepcore-miner PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_definitions(deepcore-miner PRIVATE
+    DEEPCORE_VERSION_STRING="${PROJECT_VERSION}"
+)
+
+# GPU vendor SDKs (CUDA Toolkit, NVML) are deliberately NOT find_package()'d
+# here. The GPU backend is designed around dynamic driver loading at runtime
+# (dlopen()/dlsym() on Linux, LoadLibrary()/GetProcAddress() on Windows
+# against libcuda.so / nvcuda.dll and libnvidia-ml.so / nvml.dll) so that the
+# miner builds and runs on machines without the CUDA Toolkit installed, and
+# so a HiveOS package does not need to bundle the Toolkit. When the dynamic
+# loader implementation is added under src/hardware/, link the platform's
+# dynamic-loading library here:
+if(UNIX AND NOT APPLE)
+    target_link_libraries(deepcore-miner PRIVATE ${CMAKE_DL_LIBS})
+endif()
+# On Windows, LoadLibrary/GetProcAddress live in kernel32, which is linked by
+# default - no extra target_link_libraries entry is needed there.
+
+# -----------------------------------------------------------------------------
+# Compiler warnings (compiler-specific, via generator expressions)
+# -----------------------------------------------------------------------------
+target_compile_options(deepcore-miner PRIVATE
+    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-Wall -Wextra -Wpedantic>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4>
+)
+
+# -----------------------------------------------------------------------------
+# Release optimization flags
+#
+# GCC/Clang and MSVC accept different flag syntax, so each is scoped with a
+# CXX_COMPILER_ID generator expression rather than set globally - a global
+# CMAKE_CXX_FLAGS would otherwise pass GCC-style flags to MSVC and fail.
+# -----------------------------------------------------------------------------
+
+# GCC/Clang: -O3 always for Release. -ffast-math and -march=native are gated
+# behind DEEPCORE_ENABLE_NATIVE_OPT since they are unsafe for redistributable
+# binaries (see option() comment above). NOTE: -ffast-math relaxes IEEE-754
+# semantics; it must be re-scoped OFF for any translation unit implementing
+# consensus-critical hashing/proof code once that code exists, even when this
+# option is enabled for the rest of the miner.
+target_compile_options(deepcore-miner PRIVATE
+    $<$<AND:$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>>:-O3>
+    $<$<AND:$<CONFIG:Release>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>,$<BOOL:${DEEPCORE_ENABLE_NATIVE_OPT}>>:-ffast-math -march=native>
+)
+
+# MSVC: standard Release optimizations (/O2 maximize speed, /Oi intrinsics,
+# /GL whole-program optimization) plus matching /LTCG at link time. No GCC
+# flags are ever passed here.
+target_compile_options(deepcore-miner PRIVATE
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/O2 /Oi /GL>
+)
+target_link_options(deepcore-miner PRIVATE
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:MSVC>>:/LTCG>
+)
+
+# -----------------------------------------------------------------------------
 # Future extension points (documented, not yet wired up):
 #   - enable_language(CUDA) + per-architecture object libraries under
 #     src/cuda/sm_60, sm_70, sm_75, sm_80_86, sm_89, sm_90, sm_100_120,
 #     selected via CMAKE_CUDA_ARCHITECTURES per build, once kernels exist.
-#   - A JSON + async networking dependency (e.g. vcpkg/FetchContent-provided)
-#     for src/network/stratum_client.cpp, kept out of this header-only phase.
+#   - A GPU-backed IHashSearchBackend (see src/mining/README.md) wired into
+#     deepcore-miner in place of/alongside CpuHashSearchBackend, once a
+#     production kernel exists.
 #   - install()/CPack rules for Linux tarball + checksum + SBOM generation,
 #     and a separate hiveos/ packaging step, once there is a real binary to
 #     package.
