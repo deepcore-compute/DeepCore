@@ -179,7 +179,19 @@ struct MockServer {
                         auto end = obj.find_first_of(",}", pos);
                         id_str = obj.substr(pos, end - pos);
                     }
-                    send_line(R"({"jsonrpc":"2.0","id":)" + id_str + R"(,"result":true})" "\n");
+                    // Object-shaped accept response (result:{"status":"OK"}),
+                    // not a plain boolean - this is LuckyPool's real observed
+                    // shape for a share accept (captured via
+                    // DEEPCORE_DEBUG_WIRE against the live pool, and
+                    // independently via Rigel's --log-network hitting the
+                    // same pool), distinct from its own login response
+                    // (result:true, matching zanod's shape - see the login
+                    // mock response above, also captured for real). Using
+                    // the real-world shape here, not the older boolean one,
+                    // is what makes this test actually exercise the
+                    // object-shape fix through the full client rather than
+                    // just the isolated parser (see protocol_selftest.cpp).
+                    send_line(R"({"jsonrpc":"2.0","id":)" + id_str + R"(,"result":{"status":"OK"}})" "\n");
                 }
             }
         }
