@@ -420,6 +420,26 @@ if(DEEPCORE_BUILD_REFERENCE_TOOLS)
         CXX_EXTENSIONS OFF
     )
 
+    # CPU-only correctness check for src/cuda/progpowz_codegen.hpp's
+    # per-period program trace generator/interpreter (see that file's
+    # header comment) - proves the trace-based (nonce-independent)
+    # re-derivation of the mix program is exactly equivalent to
+    # progpowz_hash_light()'s direct interpretation, across multiple
+    # periods and nonces. Zero CUDA toolchain dependency. This must pass
+    # before any CUDA source generated from the same trace can be trusted
+    # to encode the right decisions (it does not by itself validate that
+    # generated CUDA text - see that file's header comment).
+    add_executable(deepcore-codegen-selftest
+        tools/codegen_selftest/codegen_selftest.cpp
+    )
+    target_link_libraries(deepcore-codegen-selftest PRIVATE ethash-progpow-ref)
+    target_include_directories(deepcore-codegen-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda)
+    set_target_properties(deepcore-codegen-selftest PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+    )
+
     # Actual GPU correctness gate (see tools/cuda_selftest/gpu_selftest.cu
     # header comment) - only built when a CUDA compiler was actually found
     # above. This is the target that must be run on real Volta/Ampere
