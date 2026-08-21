@@ -423,6 +423,22 @@ if(DEEPCORE_BUILD_REFERENCE_TOOLS)
             CXX_STANDARD 17
             CXX_STANDARD_REQUIRED ON
         )
+
+        # Validation gate for the lane-cooperative (warp-shuffle) full-DAG
+        # kernel - see tools/warp_kernel_selftest/warp_kernel_selftest.cu's
+        # header comment. Not linked against deepcore-progpowz-work or
+        # zano-stratum-protocol - it only needs the raw CUDA kernel
+        # primitives (progpowz_kernel.cu, included directly) and the
+        # vendored reference library, same as deepcore-gpu-selftest above.
+        add_executable(deepcore-warp-kernel-selftest
+            tools/warp_kernel_selftest/warp_kernel_selftest.cu
+        )
+        target_link_libraries(deepcore-warp-kernel-selftest PRIVATE ethash-progpow-ref)
+        target_include_directories(deepcore-warp-kernel-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda)
+        set_target_properties(deepcore-warp-kernel-selftest PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED ON
+        )
     endif()
 endif()
 

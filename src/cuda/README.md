@@ -197,12 +197,51 @@ clearly logged reason, once per epoch) when it doesn't -
 path actually ran, since light mode is also correct and would otherwise
 make every check pass silently either way.
 
+## Lane-cooperative warp-shuffle kernel (GPU throughput milestone 3)
+
+**Written, NOT yet validated on real hardware - and unlike every prior
+milestone, cannot be pre-checked on CPU at all.**
+
+`progpowz_light_kernel`/`progpowz_full_kernel` map ONE GPU thread to ALL
+16 ProgPoW lanes, looping over them sequentially - correct, but not how
+ProgPoW's lane concept was actually designed to run on a GPU (16 threads
+cooperating via warp-shuffle). Tracing through the sequential algorithm
+shows the real cross-lane dependency is narrow: mix initialization,
+cache-access, math-operations, and the item-application step are all
+already fully lane-parallel (no lane needs another lane's register
+state) once every lane independently fetches the same broadcast-index
+dataset item. Only two points need real cross-lane communication: the
+per-round `item_index` broadcast, and the once-per-hash final reduction
+of all 16 lanes' `lane_hash` into one `mix_hash` - both `__shfl_sync`-
+based (full documentation in `progpowz_kernel.cu`'s header comment for
+this section).
+
+`progpowz_hash_warp_full_dag` (one thread = one lane, 16 cooperating
+threads = one hash) and `progpowz_warp_kernel`/`PersistentWarpSearcher`
+(the launch wrapper - every launched thread runs the full algorithm even
+past `count`, since `__shfl_sync` requires the whole warp in lockstep;
+only the final write is guarded) implement this. As a side effect, this
+also reduces per-thread register/stack usage substantially (~384 bytes
+for one lane's state vs. ~2048 bytes for all 16 lanes in the sequential
+kernel), which should help occupancy independent of the parallelism
+itself - not yet measured.
+
+Since `__shfl_sync` has no CPU equivalent, this is the first code in the
+whole project with no way to pre-validate the actual cross-lane mechanism
+before real hardware. `tools/warp_kernel_selftest/warp_kernel_selftest.cu`
+is the dedicated gate: compares this kernel's output against the
+already-validated full-DAG kernel (`PersistentFullDagSearcher`) AND the
+real reference implementation directly, across a single nonce, a
+non-block-aligned batch (17 - exercises the padding/tail logic), and a
+large multi-block batch (256). Deliberately NOT wired into
+`GpuHashSearchBackend` yet - it stays isolated/opt-in until its own gate
+passes for real, so the currently-working production path (plain
+full-DAG, ~524 KH/s) is never put at risk by unvalidated code.
+
 ## What does NOT exist yet
 
-- **No lane-cooperative (16 threads/warp via `__shfl_sync`) kernel**, for
-  either mode. That is the real-world performance mapping for ProgPoW on
-  GPU; the single-thread-per-hash approach here is deliberately the
-  simpler, lower-risk step, for both light and full-DAG modes.
+- **Warp-shuffle kernel not yet validated on real hardware, and not yet
+  wired into `GpuHashSearchBackend`** - see above.
 - **No launch-parameter autotuning, no CUDA Graphs / stream overlap.**
 - **No multi-GPU support, no integration with `gpu_manager.hpp`** (device
   enumeration/selection/telemetry) - `GpuHashSearchBackend` drives exactly
@@ -242,10 +281,22 @@ make every check pass silently either way.
    mix-round lookup - pure memory-locality change, no algorithm
    difference, so existing correctness self-tests remain valid regression
    coverage. Written, not yet run on real hardware.
-7. Still open, in order: lane-cooperative warp-shuffle optimization (the
-   next real, larger lever - single-thread-per-hash is not how a
-   competitive ProgPoW kernel maps onto a GPU's warps), launch-parameter
-   autotuning per architecture, CUDA Graphs / stream overlap.
+7. **In progress.** Lane-cooperative warp-shuffle kernel
+   (`progpowz_warp_kernel`/`progpowz_hash_warp_full_dag` in
+   `progpowz_kernel.cu`) - 16 threads cooperate via `__shfl_sync` instead
+   of one thread computing all 16 lanes sequentially. Written; this is
+   the first code in this project with NO CPU-testable equivalent at
+   all (`__shfl_sync` is device-only), so correctness rests entirely on
+   `deepcore-warp-kernel-selftest` (a dedicated gate comparing its output
+   against the already-validated full-DAG kernel and the real reference
+   implementation, across single-nonce, non-block-aligned, and
+   multi-block batch sizes) - not yet run on real hardware. Not wired
+   into `GpuHashSearchBackend` yet, deliberately: it stays opt-in/
+   isolated until its own gate passes for real, so the currently-working
+   production path (the plain full-DAG kernel, ~524 KH/s) is never put
+   at risk by unvalidated code.
+8. Still open, after (7) passes: launch-parameter autotuning per
+   architecture, CUDA Graphs / stream overlap.
 
 Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
 necessary but not sufficient at each step; only real GPU execution can

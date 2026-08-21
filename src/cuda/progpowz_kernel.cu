@@ -451,6 +451,289 @@ private:
     uint32_t d_out_capacity_ = 0;
 };
 
+// ----------------------------------------------------------------------
+// GPU throughput milestone 3: lane-cooperative (warp-shuffle) kernel,
+// full-DAG mode only (light-cache mode keeps using progpowz_light_kernel/
+// progpowz_full_kernel above, unmodified).
+//
+// progpowz_hash_light (the CPU-portable core every kernel above calls)
+// maps ONE GPU THREAD to ALL 16 ProgPoW lanes, looping over them
+// sequentially inside each round - the simplest, lowest-risk correctness
+// baseline, but not how ProgPoW's "lanes" concept was actually designed
+// to map onto a GPU: 16 threads are meant to cooperate via warp-shuffle,
+// each holding only its own lane's register state, instead of one thread
+// doing 16x the sequential work.
+//
+// Tracing through progpowz_hash_light's mix loop (progpowz_portable.hpp)
+// shows the cross-lane data dependency is narrower than it might look:
+//   - mix initialization: mix[l][*]'s seed depends on l but not on any
+//     OTHER lane's state - each lane computes its own initial registers
+//     independently (see the (jsr, jcong) derivation from `l`).
+//   - the cache-access and math-operation steps within each round only
+//     ever touch mix[l][*] for the SAME l throughout a round - the
+//     src/dst/sel/rng sequence is identical across lanes (derived once
+//     per round from `base_rng`, no lane-index input) - so these need NO
+//     cross-lane communication at all.
+//   - item_index = mix[r % num_lanes][0] % num_items - this DOES need one
+//     specific lane's register 0 (whichever lane equals r % 16),
+//     broadcast to every other lane - the only per-round cross-lane read.
+//   - the item-application step's per-lane byte offset
+//     ((l ^ r) % num_lanes) * num_words_per_lane only depends on this
+//     lane's own l and the current r - no cross-lane data needed as long
+//     as every lane holds its own copy of the (identical, broadcast-
+//     index) 256-byte item. Every lane fetches it independently from
+//     full_dataset; redundant per-lane reads of the same address are
+//     cheap on real hardware (a warp's identical addresses coalesce/hit
+//     cache) and far simpler/lower-risk than trying to have each lane
+//     fetch only its own slice and shuffle the rest around.
+//   - only the FINAL reduction (folding all 16 lanes' lane_hash into one
+//     8-word mix_hash) genuinely gathers data across all 16 lanes, and
+//     only once per hash, not once per round.
+//
+// So exactly two points need real cross-lane communication: the
+// per-round item_index broadcast (__shfl_sync) and the once-per-hash
+// final reduction (also __shfl_sync-based, see below). Everything else
+// stays fully lane-parallel - the same algorithm, same values, just
+// spread across 16 cooperating threads instead of computed sequentially
+// by one.
+//
+// IMPORTANT: __shfl_sync is device-only - there is no CPU equivalent to
+// test this specific mechanism against before real hardware. Every other
+// GPU-facing change in this project could be at least partially proven
+// on CPU first (the algorithm itself, a small synthetic full_dataset,
+// etc.); this cross-lane orchestration cannot be. Correctness here rests
+// entirely on: (a) careful, direct correspondence to the already-proven
+// sequential algorithm (documented step by step above and in the
+// function below), and (b) a direct GPU-side comparison against the
+// already-validated progpowz_full_kernel for real nonces, in
+// gpu_backend_selftest - not assumed, not "should work", checked.
+// ----------------------------------------------------------------------
+
+// Executed by all num_lanes (16) threads of one lane group simultaneously
+// - every thread must reach every __shfl_sync call in lockstep (that is a
+// hard CUDA requirement, not a style preference: a __shfl_sync whose
+// participating-thread set doesn't match `mask` is undefined behavior).
+// Only the thread at `lane == 0` returns a result callers should use;
+// every other lane's returned struct is well-formed but not meaningful.
+//
+// `mask`: the __shfl_sync warp mask - the caller always uses the full
+// 0xFFFFFFFF warp mask here (see progpowz_warp_kernel below for why that
+// is always safe with this launch's thread layout).
+// `warp_lane`: this thread's index within the 32-thread WARP - what
+// __shfl_sync's source-lane argument is relative to.
+// `lane`: this thread's ProgPoW lane index within its own 16-thread group
+// (0..15).
+__device__ inline progpowz_result progpowz_hash_warp_full_dag(
+    const uint32_t* l1_cache_words, uint32_t full_dataset_num_items, const hash2048* full_dataset,
+    int block_number, const hash256& header_hash, uint64_t nonce, unsigned mask, int warp_lane, int lane)
+{
+    const int group_base_lane = warp_lane - lane;  // this group's first warp-lane index (0 or 16)
+
+    const uint64_t seed = keccak_progpow_64(header_hash, nonce);
+
+    // init_mix, this lane's slice only - see block comment above: jsr/
+    // jcong depend on `lane`, z/w do not, matching mix[lane][*]'s
+    // derivation in progpowz_hash_light exactly.
+    uint32_t r[num_regs];
+    {
+        const uint32_t z = fnv1a(fnv_offset_basis, (uint32_t)seed);
+        const uint32_t w = fnv1a(z, (uint32_t)(seed >> 32));
+        const uint32_t jsr = fnv1a(w, (uint32_t)lane);
+        const uint32_t jcong = fnv1a(jsr, (uint32_t)lane);
+        kiss99_state rng{z, w, jsr, jcong};
+        for (uint32_t i = 0; i < num_regs; ++i)
+            r[i] = kiss99_next(rng);
+    }
+
+    // mix_rng_state{block_number / period_length} - lane-independent,
+    // every lane computes the identical base_rng/dst_seq/src_seq (matches
+    // progpowz_hash_light's own single computation shared by all lanes).
+    kiss99_state base_rng;
+    uint32_t dst_seq[num_regs], src_seq[num_regs];
+    {
+        const uint64_t s = (uint64_t)(block_number / period_length);
+        const uint32_t seed_lo = (uint32_t)s, seed_hi = (uint32_t)(s >> 32);
+        const auto z = fnv1a(fnv_offset_basis, seed_lo);
+        const auto w = fnv1a(z, seed_hi);
+        const auto jsr = fnv1a(w, seed_lo);
+        const auto jcong = fnv1a(jsr, seed_hi);
+        base_rng = kiss99_state{z, w, jsr, jcong};
+        init_dst_src_seq(base_rng, dst_seq, src_seq);
+    }
+
+    constexpr int max_operations = num_cache_accesses > num_math_operations ? num_cache_accesses : num_math_operations;
+    constexpr size_t num_words_per_lane = 256 / (4 * num_lanes);
+
+    for (uint32_t round = 0; round < 64; ++round)
+    {
+        kiss99_state rng = base_rng;
+        size_t dst_counter = 0, src_counter = 0;
+
+        // item_index needs lane (round % num_lanes)'s CURRENT register 0 -
+        // every lane in the group calls this same __shfl_sync in lockstep,
+        // each specifying the identical source lane, so every lane
+        // receives the identical broadcast value.
+        const uint32_t reg0_broadcast =
+            __shfl_sync(mask, r[0], group_base_lane + static_cast<int>(round % num_lanes));
+        const uint32_t num_items = full_dataset_num_items / 2;
+        const uint32_t item_index = reg0_broadcast % num_items;
+        const hash2048 item = full_dataset[item_index];
+
+        for (int i = 0; i < max_operations; ++i)
+        {
+            if (i < num_cache_accesses)
+            {
+                const uint32_t src = src_seq[(src_counter++) % num_regs];
+                const uint32_t dst = dst_seq[(dst_counter++) % num_regs];
+                const uint32_t sel = kiss99_next(rng);
+                const size_t offset = r[src] % l1_cache_num_items;
+                random_merge(r[dst], l1_cache_words[offset], sel);
+            }
+            if (i < num_math_operations)
+            {
+                const auto src_rnd = kiss99_next(rng) % (num_regs * (num_regs - 1));
+                const auto src1 = src_rnd % num_regs;
+                auto src2 = src_rnd / num_regs;
+                if (src2 >= src1) ++src2;
+                const auto sel1 = kiss99_next(rng);
+                const auto dst = dst_seq[(dst_counter++) % num_regs];
+                const auto sel2 = kiss99_next(rng);
+                const uint32_t data = random_math(r[src1], r[src2], sel1);
+                random_merge(r[dst], data, sel2);
+            }
+        }
+
+        uint32_t dsts[num_words_per_lane], sels[num_words_per_lane];
+        for (size_t i = 0; i < num_words_per_lane; ++i)
+        {
+            dsts[i] = i == 0 ? 0 : dst_seq[(dst_counter++) % num_regs];
+            sels[i] = kiss99_next(rng);
+        }
+        const uint32_t offset = ((static_cast<uint32_t>(lane) ^ round) % num_lanes) * num_words_per_lane;
+        for (size_t i = 0; i < num_words_per_lane; ++i)
+        {
+            const uint32_t word = load_le32(item.bytes + (offset + i) * 4);
+            random_merge(r[dsts[i]], word, sels[i]);
+        }
+    }
+
+    uint32_t lane_hash = fnv_offset_basis;
+    for (uint32_t i = 0; i < num_regs; ++i)
+        lane_hash = fnv1a(lane_hash, r[i]);
+
+    // Reduction: every lane in the group calls __shfl_sync for every l in
+    // 0..15 in lockstep (required - see this function's header comment),
+    // redundantly computing the identical mh[8] fold; only lane 0's copy
+    // is actually used below.
+    uint32_t mh[8];
+    for (auto& w : mh) w = fnv_offset_basis;
+    for (int l = 0; l < static_cast<int>(num_lanes); ++l)
+    {
+        const uint32_t lh = __shfl_sync(mask, lane_hash, group_base_lane + l);
+        mh[l % 8] = fnv1a(mh[l % 8], lh);
+    }
+
+    progpowz_result out{};
+    if (lane == 0)
+    {
+        hash256 mix_hash{};
+        for (int i = 0; i < 8; ++i)
+            store_le32(mix_hash.bytes + i * 4, mh[i]);
+        out.mix_hash = mix_hash;
+        out.final_hash = keccak_progpow_256(header_hash, seed, mix_hash);
+    }
+    return out;
+}
+
+// One 16-thread lane group computes one nonce's hash. Every launched
+// thread executes progpowz_hash_warp_full_dag() in full, even threads
+// whose nonce_group falls beyond `count` (padding to keep every launched
+// warp fully, uniformly populated - required for __shfl_sync's lockstep
+// requirement; a thread that returned early would desynchronize its
+// warp-mates still trying to shuffle with it). Only the final write is
+// guarded. blockDim.x must be a multiple of 32 (always true here: this
+// project always launches 256) so warp-lane and lane-group boundaries
+// never split a warp, which is what makes the full 0xFFFFFFFF mask always
+// safe to use unconditionally.
+__global__ void progpowz_warp_kernel(
+    const uint32_t* l1_cache_words, uint32_t full_dataset_num_items, const hash2048* full_dataset,
+    int block_number, hash256 header_hash, uint64_t start_nonce, uint32_t count, GpuHashResult* out)
+{
+    __shared__ uint32_t s_l1_cache[l1_cache_num_items];
+    for (uint32_t i = threadIdx.x; i < l1_cache_num_items; i += blockDim.x)
+        s_l1_cache[i] = l1_cache_words[i];
+    __syncthreads();
+
+    const uint32_t global_thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t nonce_group = global_thread_idx / num_lanes;
+    const int lane = static_cast<int>(global_thread_idx % num_lanes);
+    const int warp_lane = static_cast<int>(threadIdx.x % 32);
+
+    const uint64_t nonce = start_nonce + nonce_group;
+    constexpr unsigned kFullWarpMask = 0xFFFFFFFFu;
+
+    progpowz_result r = progpowz_hash_warp_full_dag(
+        s_l1_cache, full_dataset_num_items, full_dataset, block_number, header_hash, nonce, kFullWarpMask,
+        warp_lane, lane);
+
+    if (lane == 0 && nonce_group < count)
+    {
+        out[nonce_group].final_hash = r.final_hash;
+        out[nonce_group].mix_hash = r.mix_hash;
+        out[nonce_group].nonce = nonce;
+    }
+}
+
+// Launches progpowz_warp_kernel against an already-built DeviceFullDataset
+// - same reused-output-buffer pattern as PersistentFullDagSearcher, but
+// sized/launched in units of num_lanes threads per nonce (blockDim.x=256
+// = 16 complete 16-thread lane groups = 16 nonces per block, and always a
+// multiple of 32 - see progpowz_warp_kernel's header comment for why that
+// matters).
+class PersistentWarpSearcher {
+public:
+    PersistentWarpSearcher() = default;
+    ~PersistentWarpSearcher() { if (d_out_) cudaFree(d_out_); }
+    PersistentWarpSearcher(const PersistentWarpSearcher&) = delete;
+    PersistentWarpSearcher& operator=(const PersistentWarpSearcher&) = delete;
+
+    std::vector<GpuHashResult> search(DeviceFullDataset& dataset, const uint32_t* device_l1_cache_words,
+        uint32_t full_dataset_num_items, int block_number, const hash256& header_hash, uint64_t start_nonce,
+        uint32_t count)
+    {
+        ensure_out_capacity(count);
+
+        const uint32_t threads_per_block = 256;  // 16 lane-groups of 16 threads each, always warp-aligned
+        const uint32_t total_threads = count * static_cast<uint32_t>(num_lanes);
+        const uint32_t blocks = (total_threads + threads_per_block - 1) / threads_per_block;
+
+        progpowz_warp_kernel<<<blocks, threads_per_block>>>(device_l1_cache_words, full_dataset_num_items,
+            dataset.device_dataset(), block_number, header_hash, start_nonce, count, d_out_);
+
+        DEEPCORE_CUDA_CHECK(cudaGetLastError());
+        DEEPCORE_CUDA_CHECK(cudaDeviceSynchronize());
+
+        std::vector<GpuHashResult> results(count);
+        DEEPCORE_CUDA_CHECK(cudaMemcpy(results.data(), d_out_, static_cast<size_t>(count) * sizeof(GpuHashResult),
+            cudaMemcpyDeviceToHost));
+        return results;
+    }
+
+private:
+    void ensure_out_capacity(uint32_t count)
+    {
+        if (count <= d_out_capacity_)
+            return;
+        if (d_out_)
+            cudaFree(d_out_);
+        DEEPCORE_CUDA_CHECK(cudaMalloc(&d_out_, static_cast<size_t>(count) * sizeof(GpuHashResult)));
+        d_out_capacity_ = count;
+    }
+
+    GpuHashResult* d_out_ = nullptr;
+    uint32_t d_out_capacity_ = 0;
+};
+
 #undef DEEPCORE_CUDA_CHECK
 
 }  // namespace deepcore::progpowz
