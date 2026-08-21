@@ -371,16 +371,52 @@ full-DAG, ~524 KH/s) is never put at risk by unvalidated code.
    now takes `base_rng`/`dst_seq`/`src_seq` as parameters instead of
    computing them internally. Pure resource-usage change, not an
    algorithm change - existing correctness self-tests
-   (`deepcore-warp-kernel-selftest`) remain valid regression coverage and
-   must still pass 10/10 unchanged. Written and CPU-only sanity-rebuilt
-   (`-DDEEPCORE_WITH_CUDA=OFF`, confirms nothing else in the tree broke);
-   NOT yet compiled with `nvcc` or run on real hardware - needs
-   re-validation on the GV100 (correctness first, then a fresh
-   `--ptxas-options=-v` reading to confirm the actual register reduction,
-   then a real hashrate measurement, then a re-sweep of
-   `DEEPCORE_WARP_THREADS_PER_BLOCK` since the optimal block size may
-   shift once register pressure per thread drops) before any performance
-   claim is made. CUDA Graphs / stream overlap still not started.
+   (`deepcore-warp-kernel-selftest`) remain valid regression coverage.
+
+   **Done, on real hardware - honest negative result.**
+   `deepcore-warp-kernel-selftest` passed 10/10 unchanged (correctness
+   preserved), but the register count only dropped 79 -> 78, not the
+   large reduction the 64-word `dst_seq`/`src_seq` arrays suggested -
+   ptxas was apparently already reusing register storage across their
+   live range with other kernel state, so moving them to shared memory
+   freed less peak register pressure than expected. At `threads_per_block=256`,
+   78 registers/thread is still `78*256=19968` registers/block, and
+   `65536/19968 ~= 3.28` still caps at 3 resident blocks/SM (768/2048
+   threads, ~37.5% occupancy) - the same ceiling as before. This specific
+   change is validated-correct and kept (no reason to revert a harmless,
+   correct simplification), but it did **not** move the occupancy needle -
+   reported honestly rather than claimed as a win, same standard as the
+   persistent-caching and shared-memory-l1_cache milestones above.
+9. **Fixed - real build-configuration bug, not a kernel issue.** The
+   `ptxas -v` output backing every register table above (including this
+   file's own now-corrected numbers) was compiled for `'sm_52'`
+   (Maxwell), not `sm_70` (Volta, this project's actual GV100 target).
+   Root cause: `CMakeLists.txt` called `enable_language(CUDA)` *before*
+   its own `if(NOT CMAKE_CUDA_ARCHITECTURES) set(CMAKE_CUDA_ARCHITECTURES
+   "70;80") endif()` guard. CMake's `enable_language(CUDA)` auto-populates
+   `CMAKE_CUDA_ARCHITECTURES` itself (with nvcc's conservative fallback
+   default) as a side effect of enabling the language, so by the time the
+   guard ran the variable was already non-empty and the intended
+   `"70;80"` override silently never applied - on every build this
+   project has ever done with `-DDEEPCORE_WITH_CUDA=ON`. This did not
+   cause any incorrect *results* (sm_52 PTX still runs correctly via JIT
+   on newer hardware, which is exactly why nothing looked broken and
+   every correctness self-test kept passing) but it means every register/
+   occupancy figure discussed in step 8 - and potentially the real
+   throughput numbers in steps 5 and 7 - was measured against the wrong
+   compilation target, not real Volta-optimized code. Fixed by moving the
+   `set(CMAKE_CUDA_ARCHITECTURES "70;80")` guard to before
+   `enable_language(CUDA)`. NOT yet re-verified on real hardware that this
+   now actually compiles for `sm_70` (expect `ptxas -v` to print `for
+   'sm_70'`, and register counts to likely differ, possibly
+   substantially, from every number recorded above) - needs a clean
+   reconfigure (`rm -rf build`, since `CMAKE_CUDA_ARCHITECTURES` is a
+   cached variable) and rebuild, then a fresh correctness pass, a fresh
+   `--ptxas-options=-v` reading, and a fresh hashrate measurement before
+   any of steps 5-8's numbers can be treated as accurate. This is a
+   larger, more consequential recheck than the shared-memory change
+   itself - do it before drawing any further conclusions from register
+   counts on this project.
 
 Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
 necessary but not sufficient at each step; only real GPU execution can

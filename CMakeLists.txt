@@ -244,6 +244,26 @@ endif()
 # ----- Finish enabling CUDA, now that CXX/C (and therefore the host compiler
 # CUDA must match) are settled ------------------------------------------------
 if(DEEPCORE_WITH_CUDA AND DEEPCORE_CUDA_COMPILER_FOUND)
+    # MUST be set BEFORE enable_language(CUDA) - CMake's enable_language(CUDA)
+    # auto-populates CMAKE_CUDA_ARCHITECTURES itself (with nvcc's own
+    # conservative fallback default, e.g. sm_52) as a side effect of enabling
+    # the language, and caches it. If that happens first, the value is
+    # already non-empty by the time a later `if(NOT CMAKE_CUDA_ARCHITECTURES)`
+    # guard runs, so it silently never applies - real bug hit on a real GV100
+    # build (Volta, sm_70): every kernel was actually compiled for sm_52, not
+    # sm_70, without any error, because sm_52 PTX still runs (JIT-compiled)
+    # on newer hardware; it's just the wrong architecture, and every
+    # register/occupancy figure derived from that build's `ptxas -v` output
+    # was for the wrong target.
+    if(NOT CMAKE_CUDA_ARCHITECTURES)
+        # This project's actual GPU fleet: Tesla V100-SXM2 (Volta,
+        # sm_70) and Tesla A100 (Ampere, sm_80). Extend this list only
+        # when a new architecture has real hardware to validate kernels
+        # against - see the "refuse to start on an unsupported GPU"
+        # requirement in the project's hardware-support policy.
+        set(CMAKE_CUDA_ARCHITECTURES "70;80")
+    endif()
+
     enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
@@ -254,15 +274,6 @@ if(DEEPCORE_WITH_CUDA AND DEEPCORE_CUDA_COMPILER_FOUND)
     # for CUDA sources than CMAKE_CXX_COMPILER, which is exactly how the
     # link-time ABI mismatch this guard exists to prevent happened before.
     set(CMAKE_CUDA_HOST_COMPILER "${CMAKE_CXX_COMPILER}")
-
-    if(NOT CMAKE_CUDA_ARCHITECTURES)
-        # This project's actual GPU fleet: Tesla V100-SXM2 (Volta,
-        # sm_70) and Tesla A100 (Ampere, sm_80). Extend this list only
-        # when a new architecture has real hardware to validate kernels
-        # against - see the "refuse to start on an unsupported GPU"
-        # requirement in the project's hardware-support policy.
-        set(CMAKE_CUDA_ARCHITECTURES "70;80")
-    endif()
 endif()
 
 # Note: the deepcore-miner executable target itself (plus its warning flags,
