@@ -17,10 +17,11 @@
 // progress against a competing miner (Rigel, ~38 MH/s on a Quadro
 // GV100): light mode alone (~13 KH/s) was about 3000x behind; the plain
 // (non-cooperative) full-DAG kernel measured ~524 KH/s (~40x faster,
-// ~72x behind); the warp-shuffle kernel used now is unmeasured through
-// this class specifically as of this revision - see
+// ~72x behind); the warp-shuffle kernel used now measures ~642 KH/s
+// (~22% faster than the plain full-DAG kernel, ~59x behind Rigel) - see
 // src/network/README.md's cross-check account and src/cuda/README.md for
-// current numbers and validation status.
+// the full history, including a real regression this milestone measured
+// and fixed along the way.
 //
 // Both the epoch's l1_cache (DeviceEpochCache) and, when in full-DAG
 // mode, the full dataset (DeviceFullDataset) are kept VRAM-resident

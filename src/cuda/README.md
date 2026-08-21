@@ -199,11 +199,16 @@ make every check pass silently either way.
 
 ## Lane-cooperative warp-shuffle kernel (GPU throughput milestone 3)
 
-**Correctness validated on real hardware (10/10 checks in
-`deepcore-warp-kernel-selftest`, first attempt). First real hashrate
-measurement through the CLI was a genuine regression (~340-354 KH/s,
-*slower* than the plain full-DAG kernel's ~524 KH/s) - diagnosed,
-fixed, re-validation pending.**
+**Validated on real hardware: correctness confirmed (10/10 checks in
+`deepcore-warp-kernel-selftest`, both before and after the memory-traffic
+fix below) and real measured throughput of ~642 KH/s - about 22% faster
+than the plain full-DAG kernel's ~524 KH/s, narrowing the gap to a
+competitive miner (Rigel, ~38 MH/s) from ~72x to ~59x.**
+
+The first version measured a genuine regression (~340-354 KH/s, slower
+than the plain kernel) before the memory-traffic fix below; both the
+regression and the fix are kept documented here as an honest account of
+what was actually measured, not just the final number.
 
 ### The regression, and why it happened
 
@@ -234,10 +239,11 @@ what the original design should have done from the start; the
 redundant-read version was an explicitly-flagged simplification that
 turned out to cost real performance once measured.
 
-Written, not yet re-validated: this changes the actual per-round data
-flow, so both `deepcore-warp-kernel-selftest` (correctness) and a fresh
-live hashrate measurement are needed before trusting either the
-correctness or the performance of this fix.
+**Re-validated on real hardware after the fix:** `deepcore-warp-kernel-
+selftest` still passes 10/10 (correctness unaffected by the memory-
+traffic change, as expected - same algorithm, different data source),
+and a live run against LuckyPool measured ~642 KH/s, confirming the fix
+achieved its goal - see the milestone summary above.
 
 `progpowz_light_kernel`/`progpowz_full_kernel` map ONE GPU thread to ALL
 16 ProgPoW lanes, looping over them sequentially - correct, but not how
@@ -277,8 +283,6 @@ full-DAG, ~524 KH/s) is never put at risk by unvalidated code.
 
 ## What does NOT exist yet
 
-- **Warp-shuffle kernel's memory-traffic fix not yet re-validated** -
-  see above.
 - **No launch-parameter autotuning, no CUDA Graphs / stream overlap.**
 - **No multi-GPU support, no integration with `gpu_manager.hpp`** (device
   enumeration/selection/telemetry) - `GpuHashSearchBackend` drives exactly
@@ -318,15 +322,14 @@ full-DAG, ~524 KH/s) is never put at risk by unvalidated code.
    mix-round lookup - pure memory-locality change, no algorithm
    difference, so existing correctness self-tests remain valid regression
    coverage. Written, not yet run on real hardware.
-7. **In progress.** Lane-cooperative warp-shuffle kernel - correctness
-   validated (10/10 checks), wired into `GpuHashSearchBackend`, but the
-   first live hashrate measurement was a real regression (~340-354 KH/s,
-   slower than the plain full-DAG kernel). Root-caused to 16x redundant
-   per-lane DAG reads; fixed to a zero-redundancy per-lane slice fetch +
-   shuffle-based redistribution (see above) - not yet re-validated for
-   correctness or performance.
-8. Still open, after (7) is re-validated: launch-parameter autotuning
-   per architecture, CUDA Graphs / stream overlap.
+7. **Done.** Lane-cooperative warp-shuffle kernel - correctness
+   validated (10/10 checks, both before and after a memory-traffic fix),
+   wired into `GpuHashSearchBackend`, real measured throughput ~642 KH/s
+   (~22% faster than the plain full-DAG kernel, ~59x behind Rigel, down
+   from ~72x) - see above for the honest account of the regression this
+   milestone measured and fixed along the way.
+8. Still open: launch-parameter autotuning per architecture, CUDA
+   Graphs / stream overlap.
 
 Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
 necessary but not sufficient at each step; only real GPU execution can
