@@ -280,17 +280,39 @@ __global__ void progpowz_dag_generate_kernel(
 // progpowz_hash_light instead of light_cache/light_cache_num_items (which
 // are unused - and therefore safe to leave null/zero - whenever
 // full_dataset is non-null; see that function's header comment).
+//
+// Performance-only addition (no algorithm change - the values read are
+// identical either way, only where they live differs): l1_cache_words is
+// the same 16KiB (l1_cache_num_items words) for every thread in the
+// kernel, so instead of every thread re-reading it from slow global
+// memory on every one of the mix loop's per-round lookups, the whole
+// block cooperatively loads it into on-chip __shared__ memory ONCE, and
+// every thread reads from that shared copy afterward. This is the kernel
+// GpuHashSearchBackend actually uses for real mining now (light mode is
+// an emergency VRAM-insufficient fallback only), so it's the one worth
+// optimizing here.
+//
+// CUDA correctness note: the cooperative load and __syncthreads() MUST
+// run before any thread can return early (idx >= count) - __syncthreads()
+// requires every thread in the block to reach it, or the wait is
+// undefined behavior. That's why the bounds check is after the sync, not
+// before, unlike progpowz_light_kernel above.
 __global__ void progpowz_full_kernel(
     const uint32_t* l1_cache_words, uint32_t full_dataset_num_items, const hash2048* full_dataset,
     int block_number, hash256 header_hash, uint64_t start_nonce, uint32_t count, GpuHashResult* out)
 {
+    __shared__ uint32_t s_l1_cache[l1_cache_num_items];
+    for (uint32_t i = threadIdx.x; i < l1_cache_num_items; i += blockDim.x)
+        s_l1_cache[i] = l1_cache_words[i];
+    __syncthreads();
+
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= count)
         return;
 
     uint64_t nonce = start_nonce + idx;
     progpowz_result r = progpowz_hash_light(
-        /*light_cache=*/nullptr, /*light_cache_num_items=*/0, l1_cache_words, full_dataset_num_items,
+        /*light_cache=*/nullptr, /*light_cache_num_items=*/0, s_l1_cache, full_dataset_num_items,
         block_number, header_hash, nonce, full_dataset);
 
     out[idx].final_hash = r.final_hash;

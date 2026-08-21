@@ -236,10 +236,16 @@ make every check pass silently either way.
    light-cache mode, closing the gap to a competitive miner (Rigel, ~38
    MH/s) from ~3000x to ~72x. Sized dynamically from queried free VRAM,
    never a hard-coded capacity assumption.
-6. Still open, in order: lane-cooperative warp-shuffle optimization (the
-   next real lever - single-thread-per-hash is not how a competitive
-   ProgPoW kernel maps onto a GPU's warps), launch-parameter autotuning
-   per architecture, CUDA Graphs / stream overlap.
+6. **In progress.** `l1_cache` (16KiB, identical for every thread) moved
+   into on-chip `__shared__` memory in `progpowz_full_kernel`, loaded
+   once per thread block instead of re-read from global memory on every
+   mix-round lookup - pure memory-locality change, no algorithm
+   difference, so existing correctness self-tests remain valid regression
+   coverage. Written, not yet run on real hardware.
+7. Still open, in order: lane-cooperative warp-shuffle optimization (the
+   next real, larger lever - single-thread-per-hash is not how a
+   competitive ProgPoW kernel maps onto a GPU's warps), launch-parameter
+   autotuning per architecture, CUDA Graphs / stream overlap.
 
 Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
 necessary but not sufficient at each step; only real GPU execution can
