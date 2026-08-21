@@ -494,6 +494,16 @@ PPZ_HD inline void random_merge(uint32_t& a, uint32_t b, uint32_t selector)
 
 struct progpowz_result { hash256 final_hash; hash256 mix_hash; };
 
+// Plain POD result record used by every GPU kernel launch path
+// (progpowz_kernel.cu's light/full/warp kernels, and the NVRTC-compiled
+// per-period kernel in progpowz_nvrtc_kernel.cpp) to copy a batch's
+// results back from device memory. Defined once here (rather than once
+// per kernel file) specifically so the NVRTC-compiled kernel - built from
+// a source string at runtime, with no access to progpowz_kernel.cu's own
+// local definition - and the host-side code that reads its output back
+// via cudaMemcpy are guaranteed to agree on the exact same layout.
+struct GpuHashResult { hash256 final_hash; hash256 mix_hash; uint64_t nonce; };
+
 // `light_cache` / `light_cache_num_items`: the epoch's light cache, used to
 // (re)compute dataset items on demand (light/verification-mode - matches
 // how tests/reference/progpowz_vectors.txt was generated).

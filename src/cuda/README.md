@@ -438,6 +438,106 @@ full-DAG, ~524 KH/s) is never put at risk by unvalidated code.
    measured on real `sm_80` (Ampere/A100) hardware - remains untested,
    same caveat as every other Ampere-facing note in this file.
 
+10. **Written, partially validated (CPU-only), NOT yet compiled or run.**
+    Per-period NVRTC compilation - the real technique production ProgPoW
+    miners use, confirmed by directly reading the real Zano-targeting
+    `hyle-team/progminer` CUDA miner's source: `base_rng`/`dst_seq`/
+    `src_seq` depend only on `block_number` (not nonce/lane), so the
+    entire 64-round mix program is fully resolved once per
+    `period_length` (50) blocks. Real miners compile that resolved,
+    literal program once per period via NVRTC instead of interpreting
+    `dst_seq`/`src_seq`/`kiss99` on every single hash the way
+    `progpowz_warp_kernel` (steps 3-9 above) does.
+
+    `src/cuda/progpowz_codegen.hpp` adds three pieces:
+    - `generate_progpowz_trace(block_number)`: walks
+      `progpowz_hash_light`'s exact loop structure and records the fully-
+      resolved decision (register indices, math/merge case, rotate
+      amount) instead of applying it.
+    - `trace_interpret_hash()`: replays a trace to compute a real hash -
+      used only to validate the trace matches `progpowz_hash_light`'s own
+      behavior.
+    - `generate_progpowz_cuda_round_source()` / a full standalone-.cu-text
+      variant: emits literal, unrolled CUDA text from a trace - no
+      `dst_seq`/`src_seq` array indexing, no runtime `kiss99` draws, no
+      switch-on-selector, meant for NVRTC compilation.
+
+    **`tools/codegen_selftest` (CPU-only, validated in this environment,
+    no CUDA needed):** 20/20 hash comparisons pass across 4
+    block_numbers/periods x 5 nonces, plus explicit cross-period-
+    distinctness and same-period-identity checks, plus a case-coverage
+    scan confirming all 11 `random_math` cases and all 4 `random_merge`
+    cases get exercised across periods (a single block_number's trace was
+    found, during review, to exercise only 7/11 - checking just one
+    period would have left 4 of the CUDA text emitter's branches
+    completely unchecked by anything). This proves the trace's DECISION
+    LOGIC is correct.
+
+    **Manual review caught one real bug before real hardware could:**
+    the first draft of the CUDA text emitter declared `uint32_t _math`
+    once per math operation but did not scope each declaration in its
+    own block, so a round with more than one math operation (every round
+    has up to 20) redeclared the same local variable - a hard C++ compile
+    error. Found by literally reading a real generated kernel's text
+    (dumped via a throwaway CPU-only tool, since `generate_progpowz_*`
+    are ordinary host functions producing `std::string`) rather than
+    assuming structural sanity checks were sufficient. Fixed by wrapping
+    each math operation's temporary in its own `{ }` scope. After the
+    fix, the entire generated kernel (both the sample used for review and
+    a second one for a different period) was additionally checked by
+    compiling it with a plain `g++ -fsyntax-only`, with only the CUDA-
+    specific keywords/intrinsics (`__shfl_sync`, `__funnelshift_l/r`,
+    `__shared__`, etc.) stubbed to plausible signatures and
+    `progpowz_portable.hpp`'s real, working `#include`s left in a real
+    compiler's hands - both parsed with zero errors. This is real
+    evidence the generated C++ is well-formed (catches redeclarations,
+    type errors, malformed expressions, unbalanced braces across the
+    whole 64-round unroll) but is explicitly NOT a CUDA-semantics check:
+    `__shfl_sync`'s actual cross-lane behavior and `__funnelshift_l/r`'s
+    bit-exact rotate semantics (confirmed only via external documentation
+    and a real reference test file, not executed) are unverified by
+    anything short of real hardware.
+
+    `src/cuda/progpowz_nvrtc_kernel.hpp`/`.cpp` (`NvrtcWarpSearcher`) is
+    the host-side driver: compiles (or reuses a cached) per-period kernel
+    via `nvrtcCreateProgram`/`nvrtcCompileProgram`, loads it via the CUDA
+    **Driver API** (`cuModuleLoadDataEx`/`cuModuleGetFunction`/
+    `cuLaunchKernel` - the first code in this project to use the Driver
+    API rather than only the Runtime API; the two are mixed via
+    `cuDevicePrimaryCtxRetain`, standard documented CUDA interop, not a
+    new risk in itself), and launches it. `progpowz_portable.hpp`'s real
+    content is embedded into the binary as a byte array at CMake
+    configure time (`CMakeLists.txt`'s "Embed progpowz_portable.hpp for
+    NVRTC" step - **reconfigure, not just rebuild, after editing that
+    header**) and handed to NVRTC as a named header, so the runtime-
+    compiled kernel reuses the exact same, already-validated primitives
+    rather than a second, divergence-prone transcription. Because NVRTC's
+    bundled standard-header support is limited and inconsistently
+    reported across CUDA versions, `<cstdint>`/`<cstring>` are also
+    supplied as small hand-written stub headers rather than relying on
+    NVRTC to provide them - removes a whole class of uncertainty at
+    negligible cost, rather than gambling on undocumented behavior.
+
+    `tools/nvrtc_kernel_selftest` is the real-hardware validation gate -
+    compares `NvrtcWarpSearcher` against the already-validated
+    `PersistentWarpSearcher` and the reference implementation directly,
+    including a same-period cached-kernel-reuse case and a
+    forces-a-recompile new-period case. **NOT yet built or run - no CUDA
+    toolkit is available in the environment that wrote this (not even
+    headers, unlike every other GPU-facing file in this project, which at
+    least got source-level review against real nvcc-compiled counterparts
+    for style; this genuinely could not be compiled here even partially).
+    This is the first GPU-facing change in this project's history with a
+    real, non-trivial chance of needing at least one real-hardware debug
+    round-trip** - not because the algorithm is unvalidated (the CPU-side
+    trace logic is genuinely proven, per above) but because the NVRTC/
+    Driver-API plumbing itself (header availability, exact API call
+    signatures, Runtime/Driver API interop in practice) is new-to-this-
+    project surface that nothing here could exercise against a real
+    compiler or a real GPU. Do not report a hashrate number for this path
+    until `deepcore-nvrtc-kernel-selftest` has actually passed on real
+    hardware.
+
 Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
 necessary but not sufficient at each step; only real GPU execution can
 validate what that step actually added.

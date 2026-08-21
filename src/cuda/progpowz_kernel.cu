@@ -28,12 +28,8 @@
 
 namespace deepcore::progpowz {
 
-struct GpuHashResult
-{
-    hash256 final_hash;
-    hash256 mix_hash;
-    uint64_t nonce;
-};
+// GpuHashResult is now defined in progpowz_portable.hpp (shared with the
+// NVRTC-compiled per-period kernel - see that struct's header comment).
 
 __global__ void progpowz_light_kernel(
     const hash512* light_cache, int64_t light_cache_num_items,

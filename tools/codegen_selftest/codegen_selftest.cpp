@@ -24,6 +24,7 @@
 // correctly reproduce every nonce's hash for that block_number.
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <vector>
 
 #include <ethash/progpow.hpp>
@@ -184,6 +185,71 @@ int main()
         std::printf("  that needs a real nvcc/NVRTC compile + on-GPU comparison (not available in\n");
         std::printf("  this environment). Do not treat this as a correctness gate.\n\n");
         if (!has_round0 || !has_round63)
+            ++g_failures;
+    }
+
+    // Same disclaimer as above: structural sanity only, not a
+    // correctness check. Verifies generate_progpowz_nvrtc_kernel_source()
+    // (the full standalone .cu source string handed to NVRTC - see
+    // progpowz_nvrtc_kernel.cpp) runs, contains the expected entry-point
+    // symbol, and has balanced braces (a real, if weak, signal that the
+    // splicing in generate_progpowz_nvrtc_kernel_source didn't produce
+    // truncated or malformed text) - NOT that it compiles or computes
+    // correct values.
+    {
+        std::string full_src = deepcore::progpowz::generate_progpowz_nvrtc_kernel_source(0);
+        bool has_entry_point = full_src.find("progpowz_nvrtc_warp_kernel") != std::string::npos;
+        bool has_extern_c = full_src.find("extern \"C\"") != std::string::npos;
+        int depth = 0;
+        bool balanced = true;
+        for (char c : full_src)
+        {
+            if (c == '{') ++depth;
+            else if (c == '}') { --depth; if (depth < 0) { balanced = false; break; } }
+        }
+        balanced = balanced && depth == 0;
+        std::printf("--- full NVRTC kernel source structural sanity (NOT a correctness check) ---\n");
+        std::printf("  generated %zu bytes, entry point present=%s, extern \"C\" present=%s, braces balanced=%s\n",
+            full_src.size(), has_entry_point ? "yes" : "no", has_extern_c ? "yes" : "no", balanced ? "yes" : "no");
+        std::printf("  This is a structural smoke test only - real validation is "
+                     "tools/nvrtc_kernel_selftest (real hardware required).\n\n");
+        if (!has_entry_point || !has_extern_c || !balanced)
+            ++g_failures;
+    }
+
+    // random_math has 11 cases (selector % 11) and random_merge has 4
+    // (selector % 4) - generate_progpowz_cuda_round_source() has a
+    // separate emission branch for each. A single block_number's trace
+    // does NOT necessarily exercise every case (case distribution depends
+    // on that period's specific kiss99 sequence - block_number=0's trace
+    // was found, during manual review, to exercise only 7 of 11 math
+    // cases), so checking only one trace would leave some emission
+    // branches completely uncovered by any check in this file. Scan
+    // across many periods and confirm every case is hit by at least one
+    // of them.
+    {
+        std::set<uint32_t> math_cases_seen, merge_cases_seen;
+        int last_block_number_needed = 0;
+        for (int bn = 0; bn < 50 * 200; bn += 50)
+        {
+            auto trace = deepcore::progpowz::generate_progpowz_trace(bn);
+            for (const auto& op : trace)
+            {
+                if (op.kind == deepcore::progpowz::TraceOpKind::Math)
+                    math_cases_seen.insert(op.math_case);
+                merge_cases_seen.insert(op.merge_case);
+            }
+            last_block_number_needed = bn;
+            if (math_cases_seen.size() == 11 && merge_cases_seen.size() == 4)
+                break;
+        }
+        std::printf("--- math/merge case coverage across periods ---\n");
+        std::printf("  all 11 random_math cases and all 4 random_merge cases observed by block_number=%d: %s\n",
+            last_block_number_needed,
+            (math_cases_seen.size() == 11 && merge_cases_seen.size() == 4) ? "PASS" : "FAIL");
+        std::printf("  (math cases seen: %zu/11, merge cases seen: %zu/4)\n\n", math_cases_seen.size(),
+            merge_cases_seen.size());
+        if (math_cases_seen.size() != 11 || merge_cases_seen.size() != 4)
             ++g_failures;
     }
 
