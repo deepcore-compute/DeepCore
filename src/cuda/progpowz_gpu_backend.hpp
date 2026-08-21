@@ -31,12 +31,16 @@
 // real CMakeLists.txt bug, see src/cuda/README.md's step 9) - after
 // fixing it and rebuilding for genuine sm_70/sm_80, the SAME kernel
 // (identical register usage) measured ~1.03 MH/s (~37x behind Rigel).
-// The NVRTC path wired in here as the new primary route has NOT yet been
-// measured for real hashrate through this backend/the CLI - do not treat
-// the ~1.03 MH/s figure as this path's number until measured; see
-// src/network/README.md's cross-check account and src/cuda/README.md for
-// the full history, including a real regression one earlier milestone
-// measured and fixed along the way.
+// The NVRTC path wired in here as the new primary route (real production
+// ProgPoW miners' actual technique - resolve the mix program once per
+// period, compile it, instead of interpreting it on every hash) has now
+// been confirmed on real hardware too: deepcore-gpu-backend-selftest's
+// `last_search_used_nvrtc()` check (not a silent fallback) passed, and a
+// live LuckyPool run measured ~2.27 MH/s - more than double the
+// interpreted kernel's ~1.03 MH/s, ~17x behind Rigel (down from ~37x) -
+// see src/network/README.md's cross-check account and src/cuda/README.md
+// for the full history, including a real regression one earlier
+// milestone measured and fixed along the way.
 //
 // Both the epoch's l1_cache (DeviceEpochCache) and, when in full-DAG
 // mode, the full dataset (DeviceFullDataset) are kept VRAM-resident

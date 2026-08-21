@@ -546,14 +546,17 @@ full-DAG, ~524 KH/s) is never put at risk by unvalidated code.
     correct path on an unexpected failure, not stall.
     `last_search_used_nvrtc()` lets `gpu_backend_selftest` assert the
     NVRTC path actually ran (not a silent fallback), same reasoning as
-    `last_search_used_full_dag()`. CPU-only sanity rebuild confirms
-    nothing else broke. **NOT yet real-hardware-validated through this
-    backend/the CLI specifically** - needs `deepcore-gpu-backend-selftest`
-    rebuilt and rerun (now compiles `progpowz_nvrtc_kernel.cpp` and links
-    `CUDA::nvrtc`/`CUDA::cuda_driver` too), and a real live hashrate
-    measurement via `deepcore-miner --gpu` against a real pool, before the
-    ~1.03 MH/s figure recorded for the interpreted warp kernel can be
-    treated as this path's number.
+    `last_search_used_full_dag()`.
+
+    **Done, on real hardware.** `deepcore-gpu-backend-selftest` passed all
+    16 checks (including the new `J2`, confirming the NVRTC path actually
+    ran, not a silent fallback to the interpreted kernel). A live
+    LuckyPool run via `deepcore-miner --gpu` on the wired-in NVRTC path
+    measured **~2.27 MH/s, up from the interpreted warp kernel's
+    ~1.03 MH/s - more than double, narrowing the gap to Rigel (~38 MH/s)
+    from ~37x to ~17x** - 1/1 shares accepted, 0 rejected/stale/invalid.
+    This is the real, confirmed-not-a-fallback number for the primary
+    production full-DAG path as it stands now.
 
 Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
 necessary but not sufficient at each step; only real GPU execution can
