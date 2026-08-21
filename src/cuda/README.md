@@ -160,7 +160,12 @@ lookup, which is what the full-DAG kernel below actually replaces.
 
 ## Full-DAG kernel (GPU throughput milestone 2)
 
-**Written, NOT yet validated on real hardware.**
+**Validated on real hardware (Quadro GV100): all 15 self-test checks
+pass (including J, confirming full-DAG mode actually ran, not a silent
+fallback), and real measured throughput against a live Zano mainnet pool:
+~524 KH/s - about 40x faster than light-cache mode's ~13 KH/s, closing
+the gap to a competitive miner (Rigel, ~38 MH/s on the same GV100) from
+~3000x down to ~72x.**
 
 `progpowz_hash_light` (in `progpowz_portable.hpp`) gained an optional
 `full_dataset` parameter: when null (every existing caller, unaffected),
@@ -194,7 +199,6 @@ make every check pass silently either way.
 
 ## What does NOT exist yet
 
-- **Full-DAG kernel not yet validated on real hardware** - see above.
 - **No lane-cooperative (16 threads/warp via `__shfl_sync`) kernel**, for
   either mode. That is the real-world performance mapping for ProgPoW on
   GPU; the single-thread-per-hash approach here is deliberately the
@@ -225,14 +229,17 @@ make every check pass silently either way.
 4. **Done.** Persistent VRAM caching (upload the epoch's caches once, not
    once per batch) - validated on a real Quadro GV100, all 14 self-test
    checks pass, see above.
-5. **In progress.** The actual throughput lever: the full-dataset
-   (precomputed DAG in VRAM, O(1) lookups instead of recompute-on-demand)
-   path. Written, validated on CPU with a small synthetic dataset,
-   sized dynamically from queried free VRAM at real scale (never a
-   hard-coded capacity assumption) - not yet run on real hardware, see
-   above. Only after that's measured working: lane-cooperative
-   warp-shuffle optimization, launch-parameter autotuning per
-   architecture, CUDA Graphs / stream overlap, etc.
+5. **Done.** The full-dataset (precomputed DAG in VRAM, O(1) lookups
+   instead of recompute-on-demand) path - validated on a real Quadro
+   GV100 (all 15 self-test checks pass), real measured throughput ~524
+   KH/s against a live Zano mainnet pool - about 40x faster than
+   light-cache mode, closing the gap to a competitive miner (Rigel, ~38
+   MH/s) from ~3000x to ~72x. Sized dynamically from queried free VRAM,
+   never a hard-coded capacity assumption.
+6. Still open, in order: lane-cooperative warp-shuffle optimization (the
+   next real lever - single-thread-per-hash is not how a competitive
+   ProgPoW kernel maps onto a GPU's warps), launch-parameter autotuning
+   per architecture, CUDA Graphs / stream overlap.
 
 Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
 necessary but not sufficient at each step; only real GPU execution can
