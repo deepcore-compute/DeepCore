@@ -6,17 +6,21 @@
 // src/cuda/README.md's "GPU milestone 1" account - all 4 recorded test
 // vectors passed byte-for-byte on a real Quadro GV100).
 //
-// SCOPE: uses the full-DAG kernel (progpowz_full_kernel /
-// DeviceFullDataset in progpowz_kernel.cu) when there is enough free VRAM
-// to build the epoch's complete dataset once (checked for real via
-// cudaMemGetInfo, never assumed); falls back to light-cache mode
-// (recompute each dataset item on demand) otherwise, with a clearly
-// printed reason - this is a real capacity constraint on some hardware,
-// not something to silently degrade past. Confirmed against a real
-// competing miner (Rigel, ~38 MH/s on a Quadro GV100) that light mode
-// alone (~13 KH/s on the same GPU) is about 3000x below competitive - see
+// SCOPE: uses the lane-cooperative warp-shuffle full-DAG kernel
+// (progpowz_warp_kernel / PersistentWarpSearcher in progpowz_kernel.cu,
+// 16 threads cooperating per hash via __shfl_sync) when there is enough
+// free VRAM to build the epoch's complete dataset once (checked for real
+// via cudaMemGetInfo, never assumed); falls back to light-cache mode
+// (recompute each dataset item on demand, one thread per hash) otherwise,
+// with a clearly printed reason - this is a real capacity constraint on
+// some hardware, not something to silently degrade past. Real, measured
+// progress against a competing miner (Rigel, ~38 MH/s on a Quadro
+// GV100): light mode alone (~13 KH/s) was about 3000x behind; the plain
+// (non-cooperative) full-DAG kernel measured ~524 KH/s (~40x faster,
+// ~72x behind); the warp-shuffle kernel used now is unmeasured through
+// this class specifically as of this revision - see
 // src/network/README.md's cross-check account and src/cuda/README.md for
-// the full-DAG kernel's own validation status.
+// current numbers and validation status.
 //
 // Both the epoch's l1_cache (DeviceEpochCache) and, when in full-DAG
 // mode, the full dataset (DeviceFullDataset) are kept VRAM-resident

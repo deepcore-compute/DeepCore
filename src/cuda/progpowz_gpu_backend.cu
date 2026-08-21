@@ -4,15 +4,18 @@
 // DEEPCORE_WITH_CUDA is on and a CUDA compiler was actually found - see
 // CMakeLists.txt.
 //
-// STATUS: the light-cache-mode version of this backend (persistent VRAM
-// caching, no full DAG) was validated on a real Quadro GV100 - see
-// src/cuda/README.md. This version adds the full-DAG kernel on top - the
-// dataset-generation and full-DAG mining kernels are new, unvalidated
-// surface (their mechanism was proven correct on CPU with a small
-// synthetic dataset in tools/cuda_selftest/cuda_selftest.cpp, but
-// real-scale, real-hardware validation has NOT been done yet). Do not
-// treat this as working until tools/gpu_backend_selftest has been
-// rebuilt and rerun on real hardware and reported PASS.
+// STATUS: light-cache mode, plain full-DAG mode, and now the
+// lane-cooperative warp-shuffle full-DAG kernel have all been validated
+// on a real Quadro GV100 - see src/cuda/README.md. This revision switches
+// the full-DAG search path from PersistentFullDagSearcher (one thread per
+// hash) to PersistentWarpSearcher (16 cooperating threads per hash, via
+// __shfl_sync) now that the warp kernel has its own dedicated real-
+// hardware validation (tools/warp_kernel_selftest, compared directly
+// against PersistentFullDagSearcher and the real reference
+// implementation) - not yet re-measured through this backend/the CLI
+// specifically. Do not treat THIS wiring as validated until
+// gpu_backend_selftest has been rebuilt and rerun and a live hashrate
+// measurement taken.
 
 #include "progpowz_gpu_backend.hpp"
 
@@ -47,7 +50,12 @@ struct GpuHashSearchBackend::Impl {
     progpowz::PersistentGpuSearcher light_searcher;
 
     progpowz::DeviceFullDataset full_dataset;
-    progpowz::PersistentFullDagSearcher full_searcher;
+    // The full-DAG search path now uses the lane-cooperative warp-shuffle
+    // kernel (16 threads/hash) rather than PersistentFullDagSearcher (1
+    // thread/hash) - see this file's header comment. PersistentFullDagSearcher
+    // itself is untouched and still exists (used by
+    // tools/warp_kernel_selftest as the cross-check baseline).
+    progpowz::PersistentWarpSearcher warp_searcher;
 
     // Deduplicates the fallback warning so it prints once per epoch that
     // doesn't fit, not once per search() call.
@@ -97,7 +105,7 @@ std::optional<FoundShare> GpuHashSearchBackend::search(const ProgPowZJob& job,
             host_light_cache, ctx.light_cache_num_items, full_dataset_num_items, dag_error))
     {
         impl_->last_used_full_dag = true;
-        results = impl_->full_searcher.search(impl_->full_dataset, impl_->epoch_cache.device_l1_cache(),
+        results = impl_->warp_searcher.search(impl_->full_dataset, impl_->epoch_cache.device_l1_cache(),
             full_dataset_num_items, job.block_number, job.pow_hash, start_nonce,
             static_cast<std::uint32_t>(count));
     }
