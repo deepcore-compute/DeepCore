@@ -522,21 +522,38 @@ full-DAG, ~524 KH/s) is never put at risk by unvalidated code.
     compares `NvrtcWarpSearcher` against the already-validated
     `PersistentWarpSearcher` and the reference implementation directly,
     including a same-period cached-kernel-reuse case and a
-    forces-a-recompile new-period case. **NOT yet built or run - no CUDA
-    toolkit is available in the environment that wrote this (not even
-    headers, unlike every other GPU-facing file in this project, which at
-    least got source-level review against real nvcc-compiled counterparts
-    for style; this genuinely could not be compiled here even partially).
-    This is the first GPU-facing change in this project's history with a
-    real, non-trivial chance of needing at least one real-hardware debug
-    round-trip** - not because the algorithm is unvalidated (the CPU-side
-    trace logic is genuinely proven, per above) but because the NVRTC/
-    Driver-API plumbing itself (header availability, exact API call
-    signatures, Runtime/Driver API interop in practice) is new-to-this-
-    project surface that nothing here could exercise against a real
-    compiler or a real GPU. Do not report a hashrate number for this path
-    until `deepcore-nvrtc-kernel-selftest` has actually passed on real
-    hardware.
+    forces-a-recompile new-period case.
+
+    **Done, on real hardware - passed on the first attempt.**
+    `deepcore-nvrtc-kernel-selftest` scored 18/18 (every batch case's
+    compile-and-launch check, kernel-vs-kernel comparison, and reference
+    cross-check) the very first time it was built and run on the GV100 -
+    including the cached-kernel-reuse case (block 49, same period as
+    block 0 - no recompile) and the forces-recompile case (block 50, new
+    period). This is genuinely notable given the header comment above's
+    own honest risk assessment (new-to-this-project API surface, zero
+    ability to even syntax-check the Driver-API/NVRTC glue before real
+    hardware) - the CPU-side trace validation plus the manual
+    generated-text review (including the one real bug that review caught
+    and fixed - see above) evidently carried real weight, not just the
+    real-hardware pass itself.
+11. **Wired into production, NOT yet measured.**
+    `GpuHashSearchBackend` (`progpowz_gpu_backend.cu`) now uses
+    `NvrtcWarpSearcher` as the primary full-DAG search path, falling back
+    to the interpreted `PersistentWarpSearcher` (with a clearly printed
+    warning, deduplicated so it doesn't spam) if the NVRTC path fails at
+    runtime for any reason - mining should degrade to a slower but still-
+    correct path on an unexpected failure, not stall.
+    `last_search_used_nvrtc()` lets `gpu_backend_selftest` assert the
+    NVRTC path actually ran (not a silent fallback), same reasoning as
+    `last_search_used_full_dag()`. CPU-only sanity rebuild confirms
+    nothing else broke. **NOT yet real-hardware-validated through this
+    backend/the CLI specifically** - needs `deepcore-gpu-backend-selftest`
+    rebuilt and rerun (now compiles `progpowz_nvrtc_kernel.cpp` and links
+    `CUDA::nvrtc`/`CUDA::cuda_driver` too), and a real live hashrate
+    measurement via `deepcore-miner --gpu` against a real pool, before the
+    ~1.03 MH/s figure recorded for the interpreted warp kernel can be
+    treated as this path's number.
 
 Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
 necessary but not sufficient at each step; only real GPU execution can

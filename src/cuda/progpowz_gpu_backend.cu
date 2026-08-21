@@ -4,18 +4,22 @@
 // DEEPCORE_WITH_CUDA is on and a CUDA compiler was actually found - see
 // CMakeLists.txt.
 //
-// STATUS: light-cache mode, plain full-DAG mode, and now the
-// lane-cooperative warp-shuffle full-DAG kernel have all been validated
-// on a real Quadro GV100 - see src/cuda/README.md. This revision switches
-// the full-DAG search path from PersistentFullDagSearcher (one thread per
-// hash) to PersistentWarpSearcher (16 cooperating threads per hash, via
-// __shfl_sync) now that the warp kernel has its own dedicated real-
-// hardware validation (tools/warp_kernel_selftest, compared directly
-// against PersistentFullDagSearcher and the real reference
-// implementation) - not yet re-measured through this backend/the CLI
-// specifically. Do not treat THIS wiring as validated until
-// gpu_backend_selftest has been rebuilt and rerun and a live hashrate
-// measurement taken.
+// STATUS: light-cache mode, plain full-DAG mode, the lane-cooperative
+// warp-shuffle full-DAG kernel, and now the per-period NVRTC-compiled
+// kernel (NvrtcWarpSearcher - see progpowz_nvrtc_kernel.hpp/.cpp and
+// src/cuda/README.md's step 10) have all been validated on a real Quadro
+// GV100 - deepcore-nvrtc-kernel-selftest passed 18/18 checks on the FIRST
+// real-hardware attempt. This revision makes the NVRTC path the primary
+// full-DAG search path (real production miners' actual technique - see
+// that README section for the sourced research), falling back to the
+// interpreted warp kernel (PersistentWarpSearcher, itself already
+// real-hardware-validated) if the NVRTC path fails at runtime for any
+// reason (e.g. a compile error on a period this project's own testing
+// didn't happen to exercise) - mining should degrade to a slower but
+// still-correct path, not stall, on an unexpected NVRTC failure. Not yet
+// re-measured for real hashrate through this backend/the CLI
+// specifically - do not treat the ~1.03 MH/s figure recorded for the
+// interpreted warp kernel as this path's number until measured.
 
 #include "progpowz_gpu_backend.hpp"
 
@@ -29,6 +33,8 @@
 // uses for run_progpowz_light_gpu, so there is exactly one implementation
 // of each, not a second copy.
 #include "progpowz_kernel.cu"
+
+#include "progpowz_nvrtc_kernel.hpp"
 
 namespace deepcore::mining {
 
@@ -50,18 +56,22 @@ struct GpuHashSearchBackend::Impl {
     progpowz::PersistentGpuSearcher light_searcher;
 
     progpowz::DeviceFullDataset full_dataset;
-    // The full-DAG search path now uses the lane-cooperative warp-shuffle
-    // kernel (16 threads/hash) rather than PersistentFullDagSearcher (1
-    // thread/hash) - see this file's header comment. PersistentFullDagSearcher
-    // itself is untouched and still exists (used by
-    // tools/warp_kernel_selftest as the cross-check baseline).
+    // Primary full-DAG path: per-period NVRTC-compiled kernel (real
+    // production miners' technique - see this file's header comment).
+    progpowz::NvrtcWarpSearcher nvrtc_warp_searcher;
+    // Fallback if the NVRTC path fails at runtime, and the cross-check
+    // baseline for tools/nvrtc_kernel_selftest and
+    // tools/warp_kernel_selftest - itself already real-hardware-validated
+    // (interpreted per-hash, no NVRTC/Driver-API dependency to fail).
     progpowz::PersistentWarpSearcher warp_searcher;
 
-    // Deduplicates the fallback warning so it prints once per epoch that
-    // doesn't fit, not once per search() call.
+    // Deduplicates the fallback warnings so each prints once per
+    // condition, not once per search() call.
     const void* last_fallback_warned_identity = nullptr;
+    bool last_nvrtc_failure_warned = false;
 
     bool last_used_full_dag = false;
+    bool last_used_nvrtc = false;
 };
 
 GpuHashSearchBackend::GpuHashSearchBackend(int device_index)
@@ -79,6 +89,11 @@ std::uint64_t GpuHashSearchBackend::preferred_batch_size() const
 bool GpuHashSearchBackend::last_search_used_full_dag() const
 {
     return impl_->last_used_full_dag;
+}
+
+bool GpuHashSearchBackend::last_search_used_nvrtc() const
+{
+    return impl_->last_used_nvrtc;
 }
 
 std::optional<FoundShare> GpuHashSearchBackend::search(const ProgPowZJob& job,
@@ -105,13 +120,37 @@ std::optional<FoundShare> GpuHashSearchBackend::search(const ProgPowZJob& job,
             host_light_cache, ctx.light_cache_num_items, full_dataset_num_items, dag_error))
     {
         impl_->last_used_full_dag = true;
-        results = impl_->warp_searcher.search(impl_->full_dataset, impl_->epoch_cache.device_l1_cache(),
-            full_dataset_num_items, job.block_number, job.pow_hash, start_nonce,
-            static_cast<std::uint32_t>(count));
+
+        std::string nvrtc_error;
+        const bool nvrtc_ok = impl_->nvrtc_warp_searcher.search(impl_->epoch_cache.device_l1_cache(),
+            full_dataset_num_items, impl_->full_dataset.device_dataset(), job.block_number, job.pow_hash,
+            start_nonce, static_cast<std::uint32_t>(count), results, nvrtc_error);
+
+        if (nvrtc_ok)
+        {
+            impl_->last_used_nvrtc = true;
+            impl_->last_nvrtc_failure_warned = false;
+        }
+        else
+        {
+            impl_->last_used_nvrtc = false;
+            if (!impl_->last_nvrtc_failure_warned)
+            {
+                std::fprintf(stderr,
+                    "GpuHashSearchBackend: NVRTC kernel path failed (%s) - falling back to the "
+                    "interpreted warp kernel (correct, but slower - see src/cuda/README.md)\n",
+                    nvrtc_error.c_str());
+                impl_->last_nvrtc_failure_warned = true;
+            }
+            results = impl_->warp_searcher.search(impl_->full_dataset, impl_->epoch_cache.device_l1_cache(),
+                full_dataset_num_items, job.block_number, job.pow_hash, start_nonce,
+                static_cast<std::uint32_t>(count));
+        }
     }
     else
     {
         impl_->last_used_full_dag = false;
+        impl_->last_used_nvrtc = false;
         if (impl_->last_fallback_warned_identity != host_light_cache)
         {
             std::fprintf(stderr,

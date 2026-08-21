@@ -6,26 +6,37 @@
 // src/cuda/README.md's "GPU milestone 1" account - all 4 recorded test
 // vectors passed byte-for-byte on a real Quadro GV100).
 //
-// SCOPE: uses the lane-cooperative warp-shuffle full-DAG kernel
-// (progpowz_warp_kernel / PersistentWarpSearcher in progpowz_kernel.cu,
-// 16 threads cooperating per hash via __shfl_sync) when there is enough
-// free VRAM to build the epoch's complete dataset once (checked for real
-// via cudaMemGetInfo, never assumed); falls back to light-cache mode
-// (recompute each dataset item on demand, one thread per hash) otherwise,
-// with a clearly printed reason - this is a real capacity constraint on
-// some hardware, not something to silently degrade past. Real, measured
-// progress against a competing miner (Rigel, ~38 MH/s on a Quadro
-// GV100): light mode alone (~13 KH/s) was about 3000x behind; the plain
-// (non-cooperative) full-DAG kernel measured ~524 KH/s (~40x faster,
-// ~72x behind); the warp-shuffle kernel first measured ~642 KH/s (~59x
-// behind) but that build was later found to be compiling for the wrong
-// GPU architecture (sm_52 instead of sm_70 - a real CMakeLists.txt bug,
-// see src/cuda/README.md's "Next steps" step 9) - after fixing it and
-// rebuilding for genuine sm_70/sm_80, the SAME kernel (identical register
-// usage) measures ~1.03 MH/s (~37x behind Rigel) - see
+// SCOPE: when there is enough free VRAM to build the epoch's complete
+// dataset once (checked for real via cudaMemGetInfo, never assumed), uses
+// the per-period NVRTC-compiled kernel (NvrtcWarpSearcher -
+// progpowz_nvrtc_kernel.hpp/.cpp; real production ProgPoW miners' actual
+// technique, see src/cuda/README.md's step 10) as the primary full-DAG
+// path, falling back to the interpreted lane-cooperative warp-shuffle
+// kernel (progpowz_warp_kernel / PersistentWarpSearcher in
+// progpowz_kernel.cu) if the NVRTC path fails at runtime for any reason -
+// both are already real-hardware-validated individually
+// (deepcore-nvrtc-kernel-selftest: 18/18 on the first real-hardware
+// attempt; deepcore-warp-kernel-selftest: 10/10). Falls back further to
+// light-cache mode (recompute each dataset item on demand, one thread per
+// hash) when the full dataset itself doesn't fit in VRAM, with a clearly
+// printed reason in each fallback case - these are real constraints/
+// failure modes, not something to silently degrade past.
+//
+// Real, measured progress against a competing miner (Rigel, ~38 MH/s on
+// a Quadro GV100): light mode alone (~13 KH/s) was about 3000x behind;
+// the plain (non-cooperative) full-DAG kernel measured ~524 KH/s (~40x
+// faster, ~72x behind); the interpreted warp-shuffle kernel first
+// measured ~642 KH/s (~59x behind) but that build was later found to be
+// compiling for the wrong GPU architecture (sm_52 instead of sm_70 - a
+// real CMakeLists.txt bug, see src/cuda/README.md's step 9) - after
+// fixing it and rebuilding for genuine sm_70/sm_80, the SAME kernel
+// (identical register usage) measured ~1.03 MH/s (~37x behind Rigel).
+// The NVRTC path wired in here as the new primary route has NOT yet been
+// measured for real hashrate through this backend/the CLI - do not treat
+// the ~1.03 MH/s figure as this path's number until measured; see
 // src/network/README.md's cross-check account and src/cuda/README.md for
-// the full history, including a real regression this milestone measured
-// and fixed along the way.
+// the full history, including a real regression one earlier milestone
+// measured and fixed along the way.
 //
 // Both the epoch's l1_cache (DeviceEpochCache) and, when in full-DAG
 // mode, the full dataset (DeviceFullDataset) are kept VRAM-resident
@@ -77,6 +88,16 @@ public:
     // (light mode is also correct - passing tests alone don't prove which
     // path ran). Undefined (returns false) before the first search() call.
     [[nodiscard]] bool last_search_used_full_dag() const;
+
+    // True iff the most recent full-DAG search() call used the per-period
+    // NVRTC-compiled kernel rather than falling back to the interpreted
+    // warp kernel (see progpowz_gpu_backend.cu's header comment for why a
+    // runtime fallback exists at all). Meaningless when
+    // last_search_used_full_dag() is false (light-cache mode doesn't
+    // involve either warp kernel). Exists so gpu_backend_selftest can
+    // assert the NVRTC path was actually exercised, not silently
+    // fell back every time.
+    [[nodiscard]] bool last_search_used_nvrtc() const;
 
 private:
     int device_index_;

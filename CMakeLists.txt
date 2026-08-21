@@ -566,12 +566,23 @@ if(DEEPCORE_BUILD_NETWORK_PROTOCOL AND DEEPCORE_BUILD_REFERENCE_TOOLS)
     # deepcore-progpowz-work, hence nested here rather than in the
     # DEEPCORE_BUILD_REFERENCE_TOOLS block above.
     if(DEEPCORE_WITH_CUDA AND CMAKE_CUDA_COMPILER)
+        # progpowz_gpu_backend.cu now drives the per-period NVRTC-compiled
+        # kernel as its primary full-DAG path (see that file's header
+        # comment) - needs progpowz_nvrtc_kernel.cpp (plain host C++,
+        # compiled separately from the .cu sources - same mixed-TU
+        # pattern as deepcore-nvrtc-kernel-selftest) and CUDA::nvrtc /
+        # CUDA::cuda_driver.
         add_executable(deepcore-gpu-backend-selftest
             tools/gpu_backend_selftest/gpu_backend_selftest.cu
             src/cuda/progpowz_gpu_backend.cu
+            src/cuda/progpowz_nvrtc_kernel.cpp
         )
-        target_link_libraries(deepcore-gpu-backend-selftest PRIVATE deepcore-progpowz-work ethash-progpow-ref)
-        target_include_directories(deepcore-gpu-backend-selftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda)
+        target_link_libraries(deepcore-gpu-backend-selftest PRIVATE
+            deepcore-progpowz-work ethash-progpow-ref CUDA::nvrtc CUDA::cuda_driver)
+        target_include_directories(deepcore-gpu-backend-selftest PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/cuda
+            ${CMAKE_BINARY_DIR}/generated
+        )
         set_target_properties(deepcore-gpu-backend-selftest PROPERTIES
             CXX_STANDARD 17
             CXX_STANDARD_REQUIRED ON
@@ -608,8 +619,16 @@ if(DEEPCORE_BUILD_NETWORK_PROTOCOL AND DEEPCORE_BUILD_REFERENCE_TOOLS)
     )
 
     if(DEEPCORE_WITH_CUDA AND CMAKE_CUDA_COMPILER)
-        target_sources(deepcore-miner PRIVATE src/cuda/progpowz_gpu_backend.cu)
+        # progpowz_nvrtc_kernel.cpp (plain host C++, needs CUDA::nvrtc /
+        # CUDA::cuda_driver) - see progpowz_gpu_backend.cu's header
+        # comment for why the primary full-DAG path now goes through it.
+        target_sources(deepcore-miner PRIVATE
+            src/cuda/progpowz_gpu_backend.cu
+            src/cuda/progpowz_nvrtc_kernel.cpp
+        )
         target_compile_definitions(deepcore-miner PRIVATE DEEPCORE_HAVE_GPU_BACKEND)
+        target_link_libraries(deepcore-miner PRIVATE CUDA::nvrtc CUDA::cuda_driver)
+        target_include_directories(deepcore-miner PRIVATE ${CMAKE_BINARY_DIR}/generated)
     endif()
 else()
     add_executable(deepcore-miner

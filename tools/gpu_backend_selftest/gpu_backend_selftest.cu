@@ -214,6 +214,17 @@ int main()
     {
         check(backend.last_search_used_full_dag(),
             "J: the most recent search() used full-DAG mode, not a silent light-cache fallback");
+        // Same reasoning, one level deeper: full-DAG mode itself now has
+        // two paths (the per-period NVRTC-compiled kernel, primary; the
+        // interpreted warp kernel, fallback on an NVRTC runtime failure -
+        // see progpowz_gpu_backend.cu's header comment) - a passing test
+        // suite doesn't by itself prove which one actually ran, and a
+        // silent fallback to the slower path would be worth investigating
+        // separately, not just accepted because results were still
+        // correct.
+        check(backend.last_search_used_nvrtc(),
+            "J2: the most recent search() used the NVRTC-compiled kernel, not a silent fallback to the "
+            "interpreted warp kernel");
     }
 
     if (g_failures == 0)
