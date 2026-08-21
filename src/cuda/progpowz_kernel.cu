@@ -577,7 +577,27 @@ __device__ inline progpowz_result progpowz_hash_warp_full_dag(
             __shfl_sync(mask, r[0], group_base_lane + static_cast<int>(round % num_lanes));
         const uint32_t num_items = full_dataset_num_items / 2;
         const uint32_t item_index = reg0_broadcast % num_items;
-        const hash2048 item = full_dataset[item_index];
+
+        // Each of the 16 lanes reads ONLY its own 16-byte (num_words_per_lane
+        // = 4 words) slice of the 256-byte item - together the group covers
+        // the full item with ZERO redundant global memory traffic (an
+        // earlier version had every lane independently read the full 256
+        // bytes, i.e. 16x more DAG traffic than necessary; measured ~35%
+        // SLOWER than the plain non-cooperative kernel on real hardware as
+        // a direct result - see src/cuda/README.md's account of that
+        // regression). Thread `lane`'s own slice lives at byte offset
+        // `lane * num_words_per_lane * 4` within the item - this is a
+        // FIXED identity mapping, independent of `round`; which slice each
+        // lane actually NEEDS this round ((lane ^ round) % num_lanes) is
+        // obtained below via __shfl_sync from whichever lane's identity
+        // slice matches, not by re-reading memory.
+        const hash2048* item_ptr = &full_dataset[item_index];
+        uint32_t my_slice[num_words_per_lane];
+        {
+            const uint32_t my_slice_byte_offset = static_cast<uint32_t>(lane) * num_words_per_lane * 4;
+            for (size_t i = 0; i < num_words_per_lane; ++i)
+                my_slice[i] = load_le32(item_ptr->bytes + my_slice_byte_offset + i * 4);
+        }
 
         for (int i = 0; i < max_operations; ++i)
         {
@@ -609,10 +629,15 @@ __device__ inline progpowz_result progpowz_hash_warp_full_dag(
             dsts[i] = i == 0 ? 0 : dst_seq[(dst_counter++) % num_regs];
             sels[i] = kiss99_next(rng);
         }
-        const uint32_t offset = ((static_cast<uint32_t>(lane) ^ round) % num_lanes) * num_words_per_lane;
+        // The slice this lane actually needs this round, obtained by
+        // shuffling from whichever lane's identity slice matches - every
+        // lane in the group calls __shfl_sync in lockstep (required, same
+        // as the item_index broadcast and final reduction above/below),
+        // each with its own `needed_slice` as the source lane.
+        const int needed_slice = static_cast<int>((static_cast<uint32_t>(lane) ^ round) % num_lanes);
         for (size_t i = 0; i < num_words_per_lane; ++i)
         {
-            const uint32_t word = load_le32(item.bytes + (offset + i) * 4);
+            const uint32_t word = __shfl_sync(mask, my_slice[i], group_base_lane + needed_slice);
             random_merge(r[dsts[i]], word, sels[i]);
         }
     }

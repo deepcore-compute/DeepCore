@@ -199,15 +199,45 @@ make every check pass silently either way.
 
 ## Lane-cooperative warp-shuffle kernel (GPU throughput milestone 3)
 
-**Validated on real hardware (Quadro GV100): all 10 checks pass in
-`deepcore-warp-kernel-selftest` (5 cases x 2 checks each - single
-nonces, a non-block-aligned batch, and a 256-nonce multi-block batch,
-each cross-checked against both the already-proven full-DAG kernel and
-the real reference implementation directly). First-attempt correctness
-on code with no CPU-testable equivalent at all. Now wired into
-`GpuHashSearchBackend` as the default full-DAG search path (replacing
-the plain, non-cooperative full-DAG kernel) - not yet re-measured for
-real hashrate through the CLI specifically.**
+**Correctness validated on real hardware (10/10 checks in
+`deepcore-warp-kernel-selftest`, first attempt). First real hashrate
+measurement through the CLI was a genuine regression (~340-354 KH/s,
+*slower* than the plain full-DAG kernel's ~524 KH/s) - diagnosed,
+fixed, re-validation pending.**
+
+### The regression, and why it happened
+
+The first version had every one of the 16 cooperating lanes
+independently read the FULL 256-byte dataset item from global memory
+(each lane needed only its own 16-byte slice, but fetched the whole
+thing for simplicity - see the design rationale originally written
+here). That is 16x more DAG memory traffic than the plain kernel needs
+for the same hash: 64 rounds x 16 lanes x 256 bytes = 256 KiB/hash vs.
+64 rounds x 256 bytes = 16 KiB/hash. On a workload this memory-
+bandwidth-bound (effectively random access across a multi-GB dataset,
+which defeats caching), that redundancy measurably outweighed the
+compute-parallelism gain from cooperating in the first place - a real,
+reproducible result, not a guess, and an important lesson that "more
+parallel threads" isn't automatically faster when the bottleneck is
+memory bandwidth, not compute.
+
+**Fix:** each lane now reads only its own fixed 16-byte identity slice
+of the item (lane `l` reads bytes `[l*16, l*16+16)` - together the 16
+lanes cover the full 256 bytes with zero redundant reads), then obtains
+the specific slice it actually needs THIS round via `__shfl_sync` from
+whichever lane's identity slice matches `(lane ^ round) % num_lanes` -
+exchanging already-fetched register data instead of re-reading memory.
+Total DAG traffic per hash is now identical to the plain kernel (16
+KiB), while keeping the 16x compute-parallelism benefit. This is the
+standard, correct way to map ProgPoW's lane concept onto a GPU warp -
+what the original design should have done from the start; the
+redundant-read version was an explicitly-flagged simplification that
+turned out to cost real performance once measured.
+
+Written, not yet re-validated: this changes the actual per-round data
+flow, so both `deepcore-warp-kernel-selftest` (correctness) and a fresh
+live hashrate measurement are needed before trusting either the
+correctness or the performance of this fix.
 
 `progpowz_light_kernel`/`progpowz_full_kernel` map ONE GPU thread to ALL
 16 ProgPoW lanes, looping over them sequentially - correct, but not how
@@ -247,8 +277,8 @@ full-DAG, ~524 KH/s) is never put at risk by unvalidated code.
 
 ## What does NOT exist yet
 
-- **Warp-shuffle kernel not yet re-measured for real hashrate through
-  `GpuHashSearchBackend`/the CLI** - see above.
+- **Warp-shuffle kernel's memory-traffic fix not yet re-validated** -
+  see above.
 - **No launch-parameter autotuning, no CUDA Graphs / stream overlap.**
 - **No multi-GPU support, no integration with `gpu_manager.hpp`** (device
   enumeration/selection/telemetry) - `GpuHashSearchBackend` drives exactly
@@ -288,17 +318,15 @@ full-DAG, ~524 KH/s) is never put at risk by unvalidated code.
    mix-round lookup - pure memory-locality change, no algorithm
    difference, so existing correctness self-tests remain valid regression
    coverage. Written, not yet run on real hardware.
-7. **Done.** Lane-cooperative warp-shuffle kernel
-   (`progpowz_warp_kernel`/`progpowz_hash_warp_full_dag` in
-   `progpowz_kernel.cu`) - 16 threads cooperate via `__shfl_sync` instead
-   of one thread computing all 16 lanes sequentially. Validated via
-   `deepcore-warp-kernel-selftest` (10/10 checks, first attempt) against
-   both the already-proven full-DAG kernel and the real reference
-   implementation, and now wired into `GpuHashSearchBackend` as the
-   default full-DAG path. Real hashrate through the CLI not yet
-   re-measured with this change - that's the next step.
-8. Still open: launch-parameter autotuning per architecture, CUDA
-   Graphs / stream overlap.
+7. **In progress.** Lane-cooperative warp-shuffle kernel - correctness
+   validated (10/10 checks), wired into `GpuHashSearchBackend`, but the
+   first live hashrate measurement was a real regression (~340-354 KH/s,
+   slower than the plain full-DAG kernel). Root-caused to 16x redundant
+   per-lane DAG reads; fixed to a zero-redundancy per-lane slice fetch +
+   shuffle-based redistribution (see above) - not yet re-validated for
+   correctness or performance.
+8. Still open, after (7) is re-validated: launch-parameter autotuning
+   per architecture, CUDA Graphs / stream overlap.
 
 Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
 necessary but not sufficient at each step; only real GPU execution can
