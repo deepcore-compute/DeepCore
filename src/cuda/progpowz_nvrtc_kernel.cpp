@@ -220,30 +220,72 @@ bool NvrtcWarpSearcher::search(const void* device_l1_cache_words, uint32_t full_
         nvrtcDestroyProgram(&prog);
 
         // nvrtcCompileProgram only produces PTX - the actual SASS
-        // register allocation happens when ptxas runs implicitly here,
-        // inside cuModuleLoadDataEx (unlike nvcc's --ptxas-options=-v,
-        // which isn't available at the nvrtcCompileProgram stage - a real
+        // register allocation happens when ptxas runs implicitly during
+        // module load (unlike nvcc's --ptxas-options=-v, which has no
+        // NVRTC equivalent at the nvrtcCompileProgram stage - a real
         // NVRTC/Driver-API-specific difference from every prior kernel in
-        // this project). Requesting a verbose JIT log via these
-        // CU_JIT_* options makes ptxas emit the same register/spill
-        // report it would for an offline nvcc build - same technique a
-        // real ProgPoW-family miner (serominer/CUDAMiner.cpp) uses for
-        // this exact purpose. Always captured and printed (not gated
-        // behind an env var) since it's cheap (32KB buffer, one-time
-        // cost per period, not per hash) and this project's standing
-        // practice is to surface real diagnostic data rather than hide it.
-        char jit_log[32 * 1024] = {};
-        CUjit_option jit_options[] = {CU_JIT_LOG_VERBOSE, CU_JIT_INFO_LOG_BUFFER, CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES};
-        void* jit_option_values[] = {
-            (void*)1, (void*)jit_log, (void*)(uintptr_t)sizeof(jit_log)};
+        // this project). A first attempt requested the verbose JIT log
+        // via cuModuleLoadDataEx directly, following the CU_JIT_* option
+        // names' own documentation - but that came back empty on real
+        // hardware (16/16 correctness checks still passed - loading
+        // itself worked fine, just the diagnostic log didn't populate).
+        // This matches a real, documented gap: cuModuleLoadDataEx does
+        // not reliably surface ptxas's verbose register/spill report even
+        // with CU_JIT_LOG_VERBOSE set. The Driver API's LINKER
+        // (cuLinkCreate/cuLinkAddData/cuLinkComplete) is the officially
+        // sample-demonstrated way to get this (NVIDIA's own ptxjit sample
+        // uses exactly this sequence for exactly this purpose) - used
+        // here instead, then cuModuleLoadData loads the linker's
+        // resulting cubin.
+        char info_log[32 * 1024] = {};
+        char error_log[32 * 1024] = {};
+        float wall_time_ms = 0.0f;
+        CUjit_option link_options[] = {CU_JIT_WALL_TIME, CU_JIT_INFO_LOG_BUFFER, CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES,
+            CU_JIT_ERROR_LOG_BUFFER, CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES, CU_JIT_LOG_VERBOSE};
+        void* link_option_values[] = {(void*)&wall_time_ms, (void*)info_log, (void*)(uintptr_t)sizeof(info_log),
+            (void*)error_log, (void*)(uintptr_t)sizeof(error_log), (void*)1};
 
-        CUresult crc =
-            cuModuleLoadDataEx(&s.cu_module, ptx.data(), 3, jit_options, jit_option_values);
-        std::fprintf(
-            stderr, "NvrtcWarpSearcher: ptxas JIT log (period %d):\n%s\n", period, jit_log);
+        CUlinkState link_state{};
+        CUresult crc = cuLinkCreate(6, link_options, link_option_values, &link_state);
         if (crc != CUDA_SUCCESS)
         {
-            error = "cuModuleLoadDataEx failed (see stderr nvrtc/ptxas logs above for the PTX that failed to load)";
+            error = "cuLinkCreate failed";
+            return false;
+        }
+
+        crc = cuLinkAddData(link_state, CU_JIT_INPUT_PTX, ptx.data(), ptx.size(),
+            "progpowz_nvrtc_kernel.ptx", 0, nullptr, nullptr);
+        if (crc != CUDA_SUCCESS)
+        {
+            std::fprintf(stderr, "NvrtcWarpSearcher: cuLinkAddData failed (period %d) - error log:\n%s\n", period,
+                error_log);
+            cuLinkDestroy(link_state);
+            error = "cuLinkAddData failed (see stderr error log above)";
+            return false;
+        }
+
+        void* cubin_data = nullptr;
+        size_t cubin_size = 0;
+        crc = cuLinkComplete(link_state, &cubin_data, &cubin_size);
+        std::fprintf(stderr, "NvrtcWarpSearcher: ptxas JIT log (period %d, link wall_time=%.2fms):\n%s\n", period,
+            wall_time_ms, info_log);
+        if (crc != CUDA_SUCCESS)
+        {
+            std::fprintf(stderr, "NvrtcWarpSearcher: cuLinkComplete error log:\n%s\n", error_log);
+            cuLinkDestroy(link_state);
+            error = "cuLinkComplete failed (see stderr error log above)";
+            return false;
+        }
+
+        // cuModuleLoadData copies/parses everything it needs synchronously
+        // before returning, so it's safe to destroy the link state (which
+        // owns cubin_data's storage) right after this call - same order
+        // as NVIDIA's own ptxjit sample.
+        crc = cuModuleLoadData(&s.cu_module, cubin_data);
+        cuLinkDestroy(link_state);
+        if (crc != CUDA_SUCCESS)
+        {
+            error = "cuModuleLoadData failed (see stderr nvrtc/ptxas logs above for the PTX that failed to load)";
             return false;
         }
 
