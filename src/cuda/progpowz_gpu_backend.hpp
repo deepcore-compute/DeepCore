@@ -17,8 +17,12 @@
 // progress against a competing miner (Rigel, ~38 MH/s on a Quadro
 // GV100): light mode alone (~13 KH/s) was about 3000x behind; the plain
 // (non-cooperative) full-DAG kernel measured ~524 KH/s (~40x faster,
-// ~72x behind); the warp-shuffle kernel used now measures ~642 KH/s
-// (~22% faster than the plain full-DAG kernel, ~59x behind Rigel) - see
+// ~72x behind); the warp-shuffle kernel first measured ~642 KH/s (~59x
+// behind) but that build was later found to be compiling for the wrong
+// GPU architecture (sm_52 instead of sm_70 - a real CMakeLists.txt bug,
+// see src/cuda/README.md's "Next steps" step 9) - after fixing it and
+// rebuilding for genuine sm_70/sm_80, the SAME kernel (identical register
+// usage) measures ~1.03 MH/s (~37x behind Rigel) - see
 // src/network/README.md's cross-check account and src/cuda/README.md for
 // the full history, including a real regression this milestone measured
 // and fixed along the way.

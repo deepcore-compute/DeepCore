@@ -205,6 +205,16 @@ fix below) and real measured throughput of ~642 KH/s - about 22% faster
 than the plain full-DAG kernel's ~524 KH/s, narrowing the gap to a
 competitive miner (Rigel, ~38 MH/s) from ~72x to ~59x.**
 
+**Update: that ~642 KH/s figure was measured under the `sm_52` build-
+configuration bug (see "Next steps" step 9 below) - i.e. Maxwell-targeted
+PTX JIT-compiled onto the real Volta hardware, not genuine Volta codegen.
+After fixing the bug and rebuilding for the correct `sm_70` target (same
+kernel, same 78 registers/thread - the fix did not change register
+pressure), a live LuckyPool run measured ~1.03 MH/s - about 60% faster
+again, narrowing the gap to Rigel further, from ~59x to ~37x. This is a
+genuine, real-hardware-measured result of compiling for the right
+architecture, not of any algorithm or register change.**
+
 The first version measured a genuine regression (~340-354 KH/s, slower
 than the plain kernel) before the memory-traffic fix below; both the
 regression and the fix are kept documented here as an honest account of
@@ -406,17 +416,27 @@ full-DAG, ~524 KH/s) is never put at risk by unvalidated code.
    throughput numbers in steps 5 and 7 - was measured against the wrong
    compilation target, not real Volta-optimized code. Fixed by moving the
    `set(CMAKE_CUDA_ARCHITECTURES "70;80")` guard to before
-   `enable_language(CUDA)`. NOT yet re-verified on real hardware that this
-   now actually compiles for `sm_70` (expect `ptxas -v` to print `for
-   'sm_70'`, and register counts to likely differ, possibly
-   substantially, from every number recorded above) - needs a clean
-   reconfigure (`rm -rf build`, since `CMAKE_CUDA_ARCHITECTURES` is a
-   cached variable) and rebuild, then a fresh correctness pass, a fresh
-   `--ptxas-options=-v` reading, and a fresh hashrate measurement before
-   any of steps 5-8's numbers can be treated as accurate. This is a
-   larger, more consequential recheck than the shared-memory change
-   itself - do it before drawing any further conclusions from register
-   counts on this project.
+   `enable_language(CUDA)`.
+
+   **Re-verified on real hardware.** A clean reconfigure (`rm -rf build`
+   - required, since `CMAKE_CUDA_ARCHITECTURES` is a cached variable) and
+   rebuild now genuinely compiles for both `sm_70` and `sm_80`
+   (`ptxas -v` prints both, confirmed). `deepcore-warp-kernel-selftest`
+   still passes 10/10 - correctness unaffected, as expected (this is a
+   compilation-target change, not an algorithm change). The production
+   kernel's register usage is unchanged (`progpowz_warp_kernel`: still 78
+   registers/thread), so the occupancy ceiling from step 8 stands. But a
+   live LuckyPool run on the correctly-compiled binary measured
+   **~1.03 MH/s, up from the ~642 KH/s previously measured under the
+   buggy `sm_52` build - about 60% faster, narrowing the gap to Rigel
+   (~38 MH/s) from ~59x to ~37x** - 2/2 shares accepted, 0 rejected/
+   stale/invalid. A real, reproducible, purely-architecture-driven gain:
+   confirms Volta's real instruction selection/scheduling (independent
+   thread scheduling among other Volta-specific ISA differences from
+   Maxwell) meaningfully outperforms Maxwell-targeted PTX JIT-compiled
+   onto the same hardware, even at identical register pressure. Not yet
+   measured on real `sm_80` (Ampere/A100) hardware - remains untested,
+   same caveat as every other Ampere-facing note in this file.
 
 Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
 necessary but not sufficient at each step; only real GPU execution can
