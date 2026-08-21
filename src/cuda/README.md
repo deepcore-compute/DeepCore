@@ -328,8 +328,23 @@ full-DAG, ~524 KH/s) is never put at risk by unvalidated code.
    (~22% faster than the plain full-DAG kernel, ~59x behind Rigel, down
    from ~72x) - see above for the honest account of the regression this
    milestone measured and fixed along the way.
-8. Still open: launch-parameter autotuning per architecture, CUDA
-   Graphs / stream overlap.
+8. **In progress.** Launch-parameter tuning. Researched real constraints
+   for this project's target hardware (Volta/`sm_70`, e.g. the GV100):
+   65,536 32-bit registers and max 2048 resident threads per SM, so full
+   occupancy needs <=32 registers/thread - this kernel's per-lane state
+   alone (`r[32]` + `dst_seq[32]` + `src_seq[32]`) already exceeds that,
+   meaning it's inherently register-heavy and full theoretical occupancy
+   isn't realistically reachable without changing the algorithm itself.
+   Added `__restrict__` to the kernel's read-only pointer parameters
+   (zero-risk compiler hint - enables the read-only data cache path,
+   doesn't change any computed value) and made `threads_per_block`
+   tunable via `DEEPCORE_WARP_THREADS_PER_BLOCK` (no rebuild needed to
+   try different values) instead of a fixed 256. Written; needs a real
+   register-usage reading (`nvcc --ptxas-options=-v`) and an empirical
+   sweep (128/256/512 threads/block, measuring real hashrate at each) on
+   real hardware - guessing the right value from theory alone isn't
+   reliable for a kernel this register-heavy and memory-latency-bound.
+   CUDA Graphs / stream overlap still not started.
 
 Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
 necessary but not sufficient at each step; only real GPU execution can

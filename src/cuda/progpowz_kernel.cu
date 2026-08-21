@@ -524,8 +524,9 @@ private:
 // `lane`: this thread's ProgPoW lane index within its own 16-thread group
 // (0..15).
 __device__ inline progpowz_result progpowz_hash_warp_full_dag(
-    const uint32_t* l1_cache_words, uint32_t full_dataset_num_items, const hash2048* full_dataset,
-    int block_number, const hash256& header_hash, uint64_t nonce, unsigned mask, int warp_lane, int lane)
+    const uint32_t* __restrict__ l1_cache_words, uint32_t full_dataset_num_items,
+    const hash2048* __restrict__ full_dataset, int block_number, const hash256& header_hash, uint64_t nonce,
+    unsigned mask, int warp_lane, int lane)
 {
     const int group_base_lane = warp_lane - lane;  // this group's first warp-lane index (0 or 16)
 
@@ -681,9 +682,15 @@ __device__ inline progpowz_result progpowz_hash_warp_full_dag(
 // never split a warp, which is what makes the full 0xFFFFFFFF mask always
 // safe to use unconditionally.
 __global__ void progpowz_warp_kernel(
-    const uint32_t* l1_cache_words, uint32_t full_dataset_num_items, const hash2048* full_dataset,
-    int block_number, hash256 header_hash, uint64_t start_nonce, uint32_t count, GpuHashResult* out)
+    const uint32_t* __restrict__ l1_cache_words, uint32_t full_dataset_num_items,
+    const hash2048* __restrict__ full_dataset, int block_number, hash256 header_hash, uint64_t start_nonce,
+    uint32_t count, GpuHashResult* __restrict__ out)
 {
+    // __restrict__: l1_cache_words, full_dataset, and out are genuinely
+    // non-overlapping buffers (never aliased) - this promise lets the
+    // compiler use the read-only data cache path for the two read-only
+    // pointers and reorder/cache loads more aggressively than it could
+    // if it had to assume any of these might alias.
     __shared__ uint32_t s_l1_cache[l1_cache_num_items];
     for (uint32_t i = threadIdx.x; i < l1_cache_num_items; i += blockDim.x)
         s_l1_cache[i] = l1_cache_words[i];
@@ -715,6 +722,40 @@ __global__ void progpowz_warp_kernel(
 // = 16 complete 16-thread lane groups = 16 nonces per block, and always a
 // multiple of 32 - see progpowz_warp_kernel's header comment for why that
 // matters).
+// Threads per block for progpowz_warp_kernel launches. Defaults to 256
+// (16 lane-groups of 16 threads each, always warp-aligned - required,
+// see progpowz_warp_kernel's header comment), but can be overridden via
+// the DEEPCORE_WARP_THREADS_PER_BLOCK environment variable for empirical
+// launch-parameter tuning without a rebuild (this algorithm's real
+// register pressure - 32 ProgPoW registers plus src/dst sequences per
+// lane - means the right occupancy/block-size tradeoff isn't obvious
+// from theory alone on a register-heavy, memory-latency-bound kernel
+// like this one; measuring real hashrate at a few different values is
+// the only way to actually know). Silently ignores an invalid value
+// (not a positive multiple of 32, the hard warp-alignment requirement)
+// and falls back to the default rather than launching something unsafe.
+inline uint32_t warp_kernel_threads_per_block()
+{
+    static const uint32_t value = [] {
+        const uint32_t default_value = 256;
+        const char* env = std::getenv("DEEPCORE_WARP_THREADS_PER_BLOCK");
+        if (!env)
+            return default_value;
+        char* end = nullptr;
+        long parsed = std::strtol(env, &end, 10);
+        if (end == env || *end != '\0' || parsed <= 0 || parsed % 32 != 0)
+        {
+            std::fprintf(stderr,
+                "warning: DEEPCORE_WARP_THREADS_PER_BLOCK=\"%s\" is invalid (must be a positive multiple "
+                "of 32) - using default %u\n",
+                env, default_value);
+            return default_value;
+        }
+        return static_cast<uint32_t>(parsed);
+    }();
+    return value;
+}
+
 class PersistentWarpSearcher {
 public:
     PersistentWarpSearcher() = default;
@@ -728,7 +769,7 @@ public:
     {
         ensure_out_capacity(count);
 
-        const uint32_t threads_per_block = 256;  // 16 lane-groups of 16 threads each, always warp-aligned
+        const uint32_t threads_per_block = warp_kernel_threads_per_block();
         const uint32_t total_threads = count * static_cast<uint32_t>(num_lanes);
         const uint32_t blocks = (total_threads + threads_per_block - 1) / threads_per_block;
 
