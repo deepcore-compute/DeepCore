@@ -24,6 +24,7 @@
 
 #include "progpowz_nvrtc_kernel.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
@@ -218,10 +219,31 @@ bool NvrtcWarpSearcher::search(const void* device_l1_cache_words, uint32_t full_
         nvrtcGetPTX(prog, ptx.data());
         nvrtcDestroyProgram(&prog);
 
-        CUresult crc = cuModuleLoadDataEx(&s.cu_module, ptx.data(), 0, nullptr, nullptr);
+        // nvrtcCompileProgram only produces PTX - the actual SASS
+        // register allocation happens when ptxas runs implicitly here,
+        // inside cuModuleLoadDataEx (unlike nvcc's --ptxas-options=-v,
+        // which isn't available at the nvrtcCompileProgram stage - a real
+        // NVRTC/Driver-API-specific difference from every prior kernel in
+        // this project). Requesting a verbose JIT log via these
+        // CU_JIT_* options makes ptxas emit the same register/spill
+        // report it would for an offline nvcc build - same technique a
+        // real ProgPoW-family miner (serominer/CUDAMiner.cpp) uses for
+        // this exact purpose. Always captured and printed (not gated
+        // behind an env var) since it's cheap (32KB buffer, one-time
+        // cost per period, not per hash) and this project's standing
+        // practice is to surface real diagnostic data rather than hide it.
+        char jit_log[32 * 1024] = {};
+        CUjit_option jit_options[] = {CU_JIT_LOG_VERBOSE, CU_JIT_INFO_LOG_BUFFER, CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES};
+        void* jit_option_values[] = {
+            (void*)1, (void*)jit_log, (void*)(uintptr_t)sizeof(jit_log)};
+
+        CUresult crc =
+            cuModuleLoadDataEx(&s.cu_module, ptx.data(), 3, jit_options, jit_option_values);
+        std::fprintf(
+            stderr, "NvrtcWarpSearcher: ptxas JIT log (period %d):\n%s\n", period, jit_log);
         if (crc != CUDA_SUCCESS)
         {
-            error = "cuModuleLoadDataEx failed (see stderr nvrtc log above for the PTX that failed to load)";
+            error = "cuModuleLoadDataEx failed (see stderr nvrtc/ptxas logs above for the PTX that failed to load)";
             return false;
         }
 
