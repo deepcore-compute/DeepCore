@@ -523,10 +523,23 @@ private:
 // __shfl_sync's source-lane argument is relative to.
 // `lane`: this thread's ProgPoW lane index within its own 16-thread group
 // (0..15).
+// `base_rng`/`dst_seq`/`src_seq`: mix_rng_state{block_number / period_length}
+// and its derived sequences - lane-independent (depend only on
+// block_number, a launch-wide constant; base_rng itself is never mutated
+// after dst_seq/src_seq are derived from it - see progpowz_portable.hpp's
+// matching comment - so it is just as safe to share as they are), so the
+// caller computes all three ONCE per block into shared memory (see
+// progpowz_warp_kernel) instead of every one of this kernel's 256 threads
+// redundantly recomputing and privately storing the identical values in
+// registers. Real ptxas register-usage data (see src/cuda/README.md's
+// launch-parameter-tuning section) showed dst_seq/src_seq alone accounted
+// for 64 of this kernel's 79 registers/thread - the single largest
+// register-pressure contributor by far.
 __device__ inline progpowz_result progpowz_hash_warp_full_dag(
     const uint32_t* __restrict__ l1_cache_words, uint32_t full_dataset_num_items,
-    const hash2048* __restrict__ full_dataset, int block_number, const hash256& header_hash, uint64_t nonce,
-    unsigned mask, int warp_lane, int lane)
+    const hash2048* __restrict__ full_dataset, kiss99_state base_rng, const uint32_t* __restrict__ dst_seq,
+    const uint32_t* __restrict__ src_seq, const hash256& header_hash, uint64_t nonce, unsigned mask,
+    int warp_lane, int lane)
 {
     const int group_base_lane = warp_lane - lane;  // this group's first warp-lane index (0 or 16)
 
@@ -544,22 +557,6 @@ __device__ inline progpowz_result progpowz_hash_warp_full_dag(
         kiss99_state rng{z, w, jsr, jcong};
         for (uint32_t i = 0; i < num_regs; ++i)
             r[i] = kiss99_next(rng);
-    }
-
-    // mix_rng_state{block_number / period_length} - lane-independent,
-    // every lane computes the identical base_rng/dst_seq/src_seq (matches
-    // progpowz_hash_light's own single computation shared by all lanes).
-    kiss99_state base_rng;
-    uint32_t dst_seq[num_regs], src_seq[num_regs];
-    {
-        const uint64_t s = (uint64_t)(block_number / period_length);
-        const uint32_t seed_lo = (uint32_t)s, seed_hi = (uint32_t)(s >> 32);
-        const auto z = fnv1a(fnv_offset_basis, seed_lo);
-        const auto w = fnv1a(z, seed_hi);
-        const auto jsr = fnv1a(w, seed_lo);
-        const auto jcong = fnv1a(jsr, seed_hi);
-        base_rng = kiss99_state{z, w, jsr, jcong};
-        init_dst_src_seq(base_rng, dst_seq, src_seq);
     }
 
     constexpr int max_operations = num_cache_accesses > num_math_operations ? num_cache_accesses : num_math_operations;
@@ -694,6 +691,26 @@ __global__ void progpowz_warp_kernel(
     __shared__ uint32_t s_l1_cache[l1_cache_num_items];
     for (uint32_t i = threadIdx.x; i < l1_cache_num_items; i += blockDim.x)
         s_l1_cache[i] = l1_cache_words[i];
+
+    // mix_rng_state{block_number / period_length}'s dst_seq/src_seq are
+    // identical for every thread in this launch (block_number is the same
+    // for the whole batch) - computed ONCE per block by thread 0 into
+    // shared memory rather than redundantly by all 256 threads in private
+    // registers. See progpowz_hash_warp_full_dag's header comment for the
+    // real register-usage data motivating this.
+    __shared__ uint32_t s_dst_seq[num_regs], s_src_seq[num_regs];
+    __shared__ kiss99_state s_base_rng;
+    if (threadIdx.x == 0)
+    {
+        const uint64_t s = (uint64_t)(block_number / period_length);
+        const uint32_t seed_lo = (uint32_t)s, seed_hi = (uint32_t)(s >> 32);
+        const auto z = fnv1a(fnv_offset_basis, seed_lo);
+        const auto w = fnv1a(z, seed_hi);
+        const auto jsr = fnv1a(w, seed_lo);
+        const auto jcong = fnv1a(jsr, seed_hi);
+        s_base_rng = kiss99_state{z, w, jsr, jcong};
+        init_dst_src_seq(s_base_rng, s_dst_seq, s_src_seq);
+    }
     __syncthreads();
 
     const uint32_t global_thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -705,8 +722,8 @@ __global__ void progpowz_warp_kernel(
     constexpr unsigned kFullWarpMask = 0xFFFFFFFFu;
 
     progpowz_result r = progpowz_hash_warp_full_dag(
-        s_l1_cache, full_dataset_num_items, full_dataset, block_number, header_hash, nonce, kFullWarpMask,
-        warp_lane, lane);
+        s_l1_cache, full_dataset_num_items, full_dataset, s_base_rng, s_dst_seq, s_src_seq, header_hash,
+        nonce, kFullWarpMask, warp_lane, lane);
 
     if (lane == 0 && nonce_group < count)
     {

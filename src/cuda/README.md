@@ -339,12 +339,48 @@ full-DAG, ~524 KH/s) is never put at risk by unvalidated code.
    (zero-risk compiler hint - enables the read-only data cache path,
    doesn't change any computed value) and made `threads_per_block`
    tunable via `DEEPCORE_WARP_THREADS_PER_BLOCK` (no rebuild needed to
-   try different values) instead of a fixed 256. Written; needs a real
-   register-usage reading (`nvcc --ptxas-options=-v`) and an empirical
-   sweep (128/256/512 threads/block, measuring real hashrate at each) on
-   real hardware - guessing the right value from theory alone isn't
-   reliable for a kernel this register-heavy and memory-latency-bound.
-   CUDA Graphs / stream overlap still not started.
+   try different values) instead of a fixed 256.
+
+   A real `nvcc --ptxas-options=-v` reading on the GV100 gave ground-truth
+   per-kernel register/stack/spill numbers (no spilling in either
+   full-DAG kernel - good, spilling would be far worse than the register
+   pressure itself):
+
+   | Kernel | Registers/thread | Stack frame | Spill stores/loads |
+   |---|---|---|---|
+   | `progpowz_warp_kernel` | 79 | 384 B | 0 / 0 |
+   | `progpowz_full_kernel` | 80 | 2560 B | 0 / 0 |
+   | `progpowz_dag_generate_kernel` | 255 | 944 B | 800 / 612 |
+   | `progpowz_light_kernel` | 255 | 3600 B | 932 / 764 |
+
+   At 79 registers/thread, `progpowz_warp_kernel` is register-limited to
+   3 resident blocks/SM (768 of 2048 threads) - only ~37.5% theoretical
+   occupancy, for both `threads_per_block=128` and `256` (they tie at
+   this same register-imposed ceiling; 512 or 64 would be worse or no
+   better). This pointed at a concrete, real lever rather than more
+   guessing: `dst_seq[32]`/`src_seq[32]` - 64 of the 79 registers - are
+   computed identically and redundantly by every one of the kernel's 256
+   threads, since they depend only on `block_number` (a launch-wide
+   constant, not on `lane` or `nonce`). Moved their computation (and
+   `base_rng`, the small state they're derived from, which is likewise
+   never mutated after that derivation - see `progpowz_portable.hpp`'s
+   matching comment) into `__shared__` memory, computed once per block by
+   thread 0 and `__syncthreads()`-published to the rest of the block,
+   instead of once per thread in private registers - the same pattern
+   already used for `l1_cache` in step 6. `progpowz_hash_warp_full_dag`
+   now takes `base_rng`/`dst_seq`/`src_seq` as parameters instead of
+   computing them internally. Pure resource-usage change, not an
+   algorithm change - existing correctness self-tests
+   (`deepcore-warp-kernel-selftest`) remain valid regression coverage and
+   must still pass 10/10 unchanged. Written and CPU-only sanity-rebuilt
+   (`-DDEEPCORE_WITH_CUDA=OFF`, confirms nothing else in the tree broke);
+   NOT yet compiled with `nvcc` or run on real hardware - needs
+   re-validation on the GV100 (correctness first, then a fresh
+   `--ptxas-options=-v` reading to confirm the actual register reduction,
+   then a real hashrate measurement, then a re-sweep of
+   `DEEPCORE_WARP_THREADS_PER_BLOCK` since the optimal block size may
+   shift once register pressure per thread drops) before any performance
+   claim is made. CUDA Graphs / stream overlap still not started.
 
 Do not skip ahead - "compiles" and "the CPU-side algorithm is correct" are
 necessary but not sufficient at each step; only real GPU execution can
